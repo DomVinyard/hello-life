@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-LIFE="./life"
+LIFE=".dna/genome"
 PASS=0
 FAIL=0
 

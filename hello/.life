@@ -1,0 +1,21 @@
+life: 0.1
+name: hello
+summary: Tiny Worker that proves the Life deploy loop
+
+requires:
+  - infra.compute
+  - infra.route
+
+commands:
+  test:
+    run: echo "hello test passed"
+
+checks:
+  - echo "hello check passed"
+
+---
+
+# Hello
+
+A minimal Cloudflare Worker. The simplest thing
+that can be deployed through Life.

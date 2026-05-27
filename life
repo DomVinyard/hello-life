@@ -21,6 +21,8 @@ const commands = {
   check,
   index: buildAndPrintIndex,
   run: runCommand,
+  deploy: deployCommand,
+  connect: connectCommand,
   help,
 };
 
@@ -466,6 +468,90 @@ function buildAndPrintIndex() {
   console.log(JSON.stringify(index, null, 2));
 }
 
+function deployCommand(target) {
+  if (!target) {
+    console.error('Usage: life deploy <directory>');
+    process.exit(1);
+  }
+
+  const index = buildIndex();
+  const entry = index.find(e => e.name === target || e.path === target || e.path.endsWith('/' + target));
+
+  if (!entry) {
+    console.error(`No .life file found for: ${target}`);
+    process.exit(1);
+  }
+
+  // Find an infra adapter that provides infra.compute
+  const adapter = index.find(e =>
+    (e.provides || []).includes('infra.compute') &&
+    e.commands.includes('deploy')
+  );
+
+  if (!adapter) {
+    console.error('No infra adapter with deploy capability installed.');
+    console.error('Install one: e.g., add a cloudflare adapter to .life/lib/');
+    process.exit(1);
+  }
+
+  const adapterParsed = parseLifeFile(path.join(ROOT, adapter.file));
+  const deployCmd = adapterParsed.commands?.deploy;
+  const runTarget = typeof deployCmd === 'object' ? deployCmd.run : deployCmd;
+
+  if (!runTarget) {
+    console.error(`Adapter ${adapter.name} has no deploy run target`);
+    process.exit(1);
+  }
+
+  const targetDir = path.join(ROOT, entry.path);
+  console.log(`Deploying ${entry.name} via ${adapter.name} adapter...`);
+
+  try {
+    execSync(`${runTarget} ${targetDir}`, {
+      cwd: path.join(ROOT, adapter.path),
+      stdio: 'inherit',
+      env: { ...process.env, LIFE_TARGET: targetDir, LIFE_TARGET_NAME: entry.name },
+    });
+  } catch (e) {
+    process.exit(e.status || 1);
+  }
+}
+
+function connectCommand(adapterName) {
+  if (!adapterName) {
+    console.error('Usage: life connect <adapter>');
+    process.exit(1);
+  }
+
+  const index = buildIndex();
+  const adapter = index.find(e => e.name === adapterName);
+
+  if (!adapter) {
+    console.error(`No adapter named ${adapterName} found.`);
+    console.error('Installed adapters: ' + index.filter(e => e.file.includes('.life/lib/')).map(e => e.name).join(', '));
+    process.exit(1);
+  }
+
+  const parsed = parseLifeFile(path.join(ROOT, adapter.file));
+  const connectCmd = parsed.commands?.connect;
+  const runTarget = typeof connectCmd === 'object' ? connectCmd.run : connectCmd;
+
+  if (!runTarget) {
+    console.error(`Adapter ${adapterName} has no connect command`);
+    process.exit(1);
+  }
+
+  try {
+    execSync(runTarget, {
+      cwd: path.join(ROOT, adapter.path),
+      stdio: 'inherit',
+      env: process.env,
+    });
+  } catch (e) {
+    process.exit(e.status || 1);
+  }
+}
+
 function help() {
   console.log(`life 0.1 — repo convention for agent-legible infra
 
@@ -475,5 +561,7 @@ Commands:
   life check [dir]         Verify interfaces against reality
   life index               Print the full index as JSON
   life run <dir.cmd>       Execute a named command
+  life deploy <dir>        Deploy via infra adapter
+  life connect <adapter>   Connect and verify an adapter
   life help                This message`);
 }

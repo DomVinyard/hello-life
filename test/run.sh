@@ -55,9 +55,9 @@ assert "counts living directories" \
   "$LIFE status" \
   "Living directories:"
 
-assert "detects unresolved capabilities" \
+assert "reports capability count" \
   "$LIFE status" \
-  "Unresolved"
+  "Capabilities provided:"
 
 # --- Index ---
 echo
@@ -152,9 +152,9 @@ assert "blog.preview resolves (provided by blog)" \
   "$LIFE check api" \
   "blog.preview"
 
-assert "check warns on missing infra provider" \
-  "$LIFE check" \
-  "Install an infra adapter"
+assert "check resolves infra via adapter" \
+  "$LIFE check blog" \
+  "✓ requires infra.compute"
 
 # --- Graph resolution ---
 echo
@@ -167,9 +167,9 @@ assert "api.ready is provided" \
   "$LIFE index" \
   "api.ready"
 
-assert "infra.compute is NOT provided (no adapter)" \
+assert "infra.compute IS provided (adapter installed)" \
   "$LIFE check blog" \
-  "not provided"
+  "✓ requires infra.compute"
 
 # --- Run ---
 echo
@@ -194,12 +194,96 @@ assert "run nonexistent.cmd fails" \
   "$LIFE run nonexistent.build" \
   "No directory"
 
-# --- Dangerous combo warnings ---
+# --- Adapter discovery ---
 echo
-echo "dangerous combo detection:"
-# api has infra.route (not public) + no auth — should NOT warn
-# We'd need a fixture with public route + storage.commit to trigger the warning
-# For now, test that life.agent warning works if we add it
+echo "adapter discovery:"
+assert "cloudflare adapter discovered" \
+  "$LIFE index" \
+  '"cloudflare"'
+
+assert "cloudflare provides infra.compute" \
+  "$LIFE index" \
+  "infra.compute"
+
+assert "infra capabilities now resolve" \
+  "$LIFE check blog" \
+  "✓ requires infra.compute"
+
+assert "hello directory discovered" \
+  "$LIFE index" \
+  '"hello"'
+
+assert "explain hello works" \
+  "$LIFE explain hello" \
+  "hello: Tiny Worker"
+
+# --- Connect ---
+echo
+echo "life connect:"
+assert "connect without token fails" \
+  "CLOUDFLARE_API_TOKEN= CLOUDFLARE_ACCOUNT_ID= $LIFE connect cloudflare" \
+  "CLOUDFLARE_API_TOKEN not set"
+
+assert "connect unknown adapter fails" \
+  "$LIFE connect nonexistent" \
+  "No adapter named"
+
+# --- Deploy ---
+echo
+echo "life deploy:"
+assert "deploy without adapter token fails" \
+  "CLOUDFLARE_API_TOKEN= $LIFE deploy hello" \
+  "Not connected\|not connected\|CLOUDFLARE_API_TOKEN"
+
+assert "deploy unknown dir fails" \
+  "$LIFE deploy nonexistent" \
+  "No .life file"
+
+# --- Live infra test (only if token is set) ---
+if [ -n "$CLOUDFLARE_API_TOKEN" ] && [ -n "$CLOUDFLARE_ACCOUNT_ID" ]; then
+  echo
+  echo "live infra (CLOUDFLARE_API_TOKEN set):"
+  # Connect
+  CONNECT_OUT=$($LIFE connect cloudflare 2>&1) || true
+  if echo "$CONNECT_OUT" | grep -q "connected\|Token valid"; then
+    echo "  ✓ connect succeeds"
+    PASS=$((PASS + 1))
+
+    # Deploy
+    DEPLOY_OUT=$($LIFE deploy hello 2>&1) || true
+    if echo "$DEPLOY_OUT" | grep -q "deployed"; then
+      echo "  ✓ deploy hello succeeds"
+      PASS=$((PASS + 1))
+
+      # Smokecheck
+      SMOKE_OUT=$(node .life/lib/cloudflare/smokecheck.js hello 2>&1) || true
+      if echo "$SMOKE_OUT" | grep -q "exists"; then
+        echo "  ✓ smokecheck hello"
+        PASS=$((PASS + 1))
+      else
+        echo "  ✗ smokecheck hello"
+        echo "    got: $SMOKE_OUT"
+        FAIL=$((FAIL + 1))
+      fi
+
+      # Cleanup
+      curl -s -X DELETE \
+        "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/hello" \
+        -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" > /dev/null 2>&1
+      echo "  (cleaned up hello worker)"
+    else
+      echo "  ✗ deploy hello"
+      echo "    got: $(echo "$DEPLOY_OUT" | head -2)"
+      FAIL=$((FAIL + 1))
+    fi
+  else
+    echo "  ⚠ connect failed (token may be scoped) — skipping deploy tests"
+    echo "    got: $(echo "$CONNECT_OUT" | tail -1)"
+  fi
+else
+  echo
+  echo "live infra: SKIPPED (set CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID to run)"
+fi
 
 # --- Summary ---
 echo

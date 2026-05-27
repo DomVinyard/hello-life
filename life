@@ -1,0 +1,479 @@
+#!/usr/bin/env node
+
+// Life 0.1 kernel — zero dependencies
+// Parses .life files, resolves capability graph, runs commands and checks.
+
+const fs = require('fs');
+const path = require('path');
+const { execSync } = require('child_process');
+
+const ROOT = findRoot(process.cwd());
+if (!ROOT) {
+  console.error('Not a Life repo (no README.life found)');
+  process.exit(1);
+}
+
+const [,, cmd, ...args] = process.argv;
+
+const commands = {
+  status,
+  explain,
+  check,
+  index: buildAndPrintIndex,
+  run: runCommand,
+  help,
+};
+
+if (!cmd || !commands[cmd]) {
+  help();
+  process.exit(cmd ? 1 : 0);
+}
+
+commands[cmd](...args);
+
+// --- Core ---
+
+function findRoot(dir) {
+  let d = dir;
+  while (d !== path.dirname(d)) {
+    if (fs.existsSync(path.join(d, 'README.life'))) return d;
+    d = path.dirname(d);
+  }
+  return null;
+}
+
+function parseLifeFile(filePath) {
+  const raw = fs.readFileSync(filePath, 'utf-8');
+  const match = raw.match(/^([\s\S]*?)---\s*\n([\s\S]*)$/);
+  let frontmatter = match ? match[1] : raw;
+  let body = match ? match[2].trim() : '';
+  const parsed = parseYaml(frontmatter.trim());
+  return { ...parsed, _body: body, _path: filePath };
+}
+
+function parseYaml(text) {
+  // Minimal YAML parser for the Life subset:
+  // top-level keys, string values, flat lists, nested objects (2 levels)
+  const result = {};
+  let currentKey = null;
+  let currentSubKey = null;
+  const lines = text.split('\n');
+
+  for (const line of lines) {
+    if (line.trim() === '' || line.trim().startsWith('#')) continue;
+
+    const indent = line.match(/^(\s*)/)[1].length;
+
+    // Top-level key (no indent)
+    if (indent === 0) {
+      const m = line.match(/^(\w[\w_-]*):\s*(.*)/);
+      if (m) {
+        currentKey = m[1];
+        currentSubKey = null;
+        const val = m[2].trim();
+        result[currentKey] = val || undefined;
+      }
+      continue;
+    }
+
+    // List item (any indent, starts with -)
+    const listMatch = line.match(/^\s+-\s+(.*)/);
+    if (listMatch && currentKey) {
+      if (!Array.isArray(result[currentKey])) result[currentKey] = [];
+      result[currentKey].push(listMatch[1].trim());
+      continue;
+    }
+
+    // 2-space indent: sub-key of top-level (e.g., command name under commands:)
+    if (indent === 2 && currentKey) {
+      const m = line.match(/^\s{2}(\w[\w_-]*):\s*(.*)/);
+      if (m) {
+        if (typeof result[currentKey] !== 'object' || Array.isArray(result[currentKey])) {
+          result[currentKey] = {};
+        }
+        currentSubKey = m[1];
+        const val = m[2].trim();
+        if (val) {
+          result[currentKey][currentSubKey] = val;
+        } else {
+          result[currentKey][currentSubKey] = {};
+        }
+      }
+      continue;
+    }
+
+    // 4+ indent: property of the current sub-key
+    if (indent >= 4 && currentKey && currentSubKey) {
+      const m = line.trim().match(/^(\w[\w_-]*):\s*(.*)/);
+      if (m && typeof result[currentKey][currentSubKey] === 'object') {
+        let val = m[2].trim();
+        // Parse inline lists: [mcp_tool, claude_skill]
+        if (val.startsWith('[') && val.endsWith(']')) {
+          val = val.slice(1, -1).split(',').map(s => s.trim()).filter(Boolean);
+        }
+        result[currentKey][currentSubKey][m[1]] = val;
+      }
+      continue;
+    }
+  }
+
+  return result;
+}
+
+function discoverLifeFiles() {
+  const files = [];
+  function walk(dir, depth = 0) {
+    if (depth > 5) return;
+    const base = path.basename(dir);
+    if (base === 'node_modules' || base === '.git' || base === 'dist') return;
+
+    const lifePath = path.join(dir, '.life');
+    if (dir !== ROOT && fs.existsSync(lifePath) && fs.statSync(lifePath).isFile()) {
+      files.push(lifePath);
+    }
+
+    // Check .life/lib/ for installed libraries
+    const libDir = path.join(dir, '.life', 'lib');
+    if (fs.existsSync(libDir) && fs.statSync(libDir).isDirectory()) {
+      for (const entry of fs.readdirSync(libDir)) {
+        const lf = path.join(libDir, entry, '.life');
+        if (fs.existsSync(lf) && fs.statSync(lf).isFile()) {
+          files.push(lf);
+        }
+      }
+    }
+
+    try {
+      for (const entry of fs.readdirSync(dir)) {
+        const full = path.join(dir, entry);
+        if (entry.startsWith('.') && entry !== '.life') continue;
+        if (fs.statSync(full).isDirectory()) walk(full, depth + 1);
+      }
+    } catch {}
+  }
+
+  // README.life is the root .life file
+  const rootLife = path.join(ROOT, 'README.life');
+  if (fs.existsSync(rootLife)) files.push(rootLife);
+
+  walk(ROOT);
+  return files;
+}
+
+function buildIndex() {
+  const files = discoverLifeFiles();
+  const entries = [];
+  for (const f of files) {
+    try {
+      const parsed = parseLifeFile(f);
+      const relPath = path.relative(ROOT, path.dirname(f));
+      entries.push({
+        path: relPath || '.',
+        file: path.relative(ROOT, f),
+        name: parsed.name || path.basename(relPath || '.'),
+        summary: parsed.summary || '',
+        requires: parsed.requires || [],
+        provides: parsed.provides || [],
+        commands: parsed.commands ? Object.keys(parsed.commands) : [],
+        checks: parsed.checks || [],
+        secrets: parsed.secrets || [],
+      });
+    } catch (e) {
+      console.error(`Warning: failed to parse ${f}: ${e.message}`);
+    }
+  }
+  return entries;
+}
+
+function resolveGraph(index) {
+  const provided = new Map(); // capability → provider entry
+  const missing = []; // { dir, capability }
+  const warnings = [];
+
+  // Collect all provides
+  for (const entry of index) {
+    for (const cap of entry.provides || []) {
+      if (provided.has(cap)) {
+        warnings.push(`Ambiguous provider: ${cap} provided by both ${provided.get(cap).name} and ${entry.name}`);
+      }
+      provided.set(cap, entry);
+    }
+  }
+
+  // Check all requires
+  for (const entry of index) {
+    for (const rawCap of entry.requires || []) {
+      const cap = rawCap.replace(/:\s*public$/, '');
+      if (!provided.has(cap)) {
+        missing.push({ dir: entry.name, capability: cap, raw: rawCap });
+      }
+    }
+  }
+
+  return { provided, missing, warnings };
+}
+
+// --- Commands ---
+
+function status() {
+  const index = buildIndex();
+  const { missing, warnings } = resolveGraph(index);
+
+  console.log(`Life repo: ${ROOT}`);
+  console.log(`Living directories: ${index.length}`);
+  console.log(`Capabilities provided: ${[...new Set(index.flatMap(e => e.provides))].length}`);
+  console.log(`Capabilities required: ${[...new Set(index.flatMap(e => e.requires))].length}`);
+
+  if (missing.length) {
+    console.log(`\nUnresolved (${missing.length}):`);
+    for (const m of missing) {
+      console.log(`  ✗ ${m.dir} requires ${m.raw}`);
+    }
+  } else {
+    console.log(`\nAll capabilities resolved.`);
+  }
+
+  if (warnings.length) {
+    console.log(`\nWarnings:`);
+    for (const w of warnings) console.log(`  ⚠ ${w}`);
+  }
+}
+
+function explain(target) {
+  if (!target) {
+    console.error('Usage: life explain <path>');
+    process.exit(1);
+  }
+
+  const targetPath = path.resolve(target);
+  const index = buildIndex();
+  const { provided, missing } = resolveGraph(index);
+
+  // Find the nearest .life file for this path (exclude root unless exact match)
+  let best = null;
+  for (const entry of index) {
+    if (entry.path === '.') continue; // skip root for path lookups
+    const entryPath = path.resolve(ROOT, entry.path);
+    if (targetPath.startsWith(entryPath)) {
+      if (!best || entry.path.length > best.path.length) {
+        best = entry;
+      }
+    }
+  }
+
+  if (!best) {
+    console.log(`No .life file governs ${path.relative(ROOT, targetPath)}`);
+    return;
+  }
+
+  const parsed = parseLifeFile(path.join(ROOT, best.file));
+
+  console.log(`${best.name}: ${best.summary}`);
+  console.log();
+
+  if (best.requires.length) {
+    console.log('Requires:');
+    for (const r of best.requires) {
+      const cap = r.replace(/:\s*public$/, '');
+      const provider = provided.get(cap);
+      const isPublic = r.includes(': public');
+      const status = provider ? `✓ (${provider.name})` : '✗ not provided';
+      console.log(`  ${r} — ${status}`);
+    }
+    console.log();
+  }
+
+  if (best.provides.length) {
+    console.log('Provides: ' + best.provides.join(', '));
+    console.log();
+  }
+
+  if (best.commands.length) {
+    console.log('Commands:');
+    const cmds = parsed.commands || {};
+    for (const name of best.commands) {
+      const cmd = cmds[name];
+      const desc = typeof cmd === 'object' ? (cmd.run || '') : (cmd || '');
+      const approval = (typeof cmd === 'object' && cmd.requires_approval === 'true') ? ' [requires approval]' : '';
+      const pub = (typeof cmd === 'object' && cmd.public === 'true') ? ' [public]' : '';
+      console.log(`  ${name}: ${desc}${approval}${pub}`);
+    }
+    console.log();
+  }
+
+  if (best.secrets.length) {
+    console.log('Secrets: ' + best.secrets.join(', '));
+    console.log();
+  }
+
+  if (parsed._body) {
+    console.log(parsed._body);
+  }
+}
+
+function check(target) {
+  const index = buildIndex();
+  const { missing, warnings } = resolveGraph(index);
+  let failures = 0;
+  let passes = 0;
+
+  // Filter to target if specified
+  const entries = target
+    ? index.filter(e => e.name === target || e.path === target || e.path.endsWith('/' + target))
+    : index;
+
+  if (target && entries.length === 0) {
+    console.error(`No .life file found for: ${target}`);
+    process.exit(1);
+  }
+
+  for (const entry of entries) {
+    console.log(`\n── ${entry.name} (${entry.path}) ──`);
+
+    // Check capabilities
+    for (const rawCap of entry.requires) {
+      const cap = rawCap.replace(/:\s*public$/, '');
+      const isMissing = missing.some(m => m.dir === entry.name && m.capability === cap);
+      if (isMissing) {
+        console.log(`  ✗ requires ${rawCap} — not provided`);
+        failures++;
+      } else {
+        console.log(`  ✓ requires ${rawCap}`);
+        passes++;
+      }
+    }
+
+    // Check secrets
+    for (const secret of entry.secrets) {
+      if (process.env[secret]) {
+        console.log(`  ✓ secret ${secret} — set`);
+        passes++;
+      } else {
+        console.log(`  ✗ secret ${secret} — not set`);
+        failures++;
+      }
+    }
+
+    // Run checks
+    for (const rawCheck of entry.checks) {
+      const checkCmd = typeof rawCheck === 'string' ? rawCheck : rawCheck.run;
+      if (!checkCmd) continue;
+      try {
+        execSync(checkCmd, {
+          cwd: path.join(ROOT, entry.path),
+          stdio: 'pipe',
+          timeout: 30000,
+        });
+        console.log(`  ✓ check: ${checkCmd}`);
+        passes++;
+      } catch (e) {
+        console.log(`  ✗ check: ${checkCmd} — failed`);
+        failures++;
+      }
+    }
+
+    // Warn on dangerous combos
+    const hasPubRoute = entry.requires.some(r => r.includes('public'));
+    const hasCommit = entry.requires.includes('storage.commit');
+    const hasAuth = entry.requires.some(r => r.startsWith('auth.'));
+    const hasLifeAgent = entry.requires.includes('life.agent');
+
+    if (hasPubRoute && hasCommit && !hasAuth) {
+      console.log(`  ⚠ public route + storage.commit without auth — review exposure`);
+    }
+    if (hasLifeAgent) {
+      console.log(`  ⚠ life.agent — this directory can spawn agent sessions and modify code`);
+    }
+  }
+
+  console.log(`\n${passes} passed, ${failures} failed${warnings.length ? `, ${warnings.length} warnings` : ''}`);
+
+  for (const w of warnings) console.log(`  ⚠ ${w}`);
+
+  if (missing.length && !target) {
+    console.log(`\nTo resolve missing capabilities:`);
+    const infraMissing = missing.filter(m => m.capability.startsWith('infra.'));
+    const otherMissing = missing.filter(m => !m.capability.startsWith('infra.'));
+    if (infraMissing.length) console.log(`  Install an infra adapter: life install cloudflare`);
+    if (otherMissing.length) {
+      for (const m of otherMissing) {
+        console.log(`  ${m.dir} requires ${m.capability} — install a library that provides it`);
+      }
+    }
+  }
+
+  process.exit(failures > 0 ? 1 : 0);
+}
+
+function runCommand(nameArg) {
+  if (!nameArg) {
+    console.error('Usage: life run <directory.command>');
+    process.exit(1);
+  }
+
+  const [dirName, cmdName] = nameArg.includes('.')
+    ? nameArg.split('.', 2)
+    : [null, nameArg];
+
+  const index = buildIndex();
+
+  let entry;
+  if (dirName) {
+    entry = index.find(e => e.name === dirName);
+  } else {
+    // Find a directory that has this command
+    entry = index.find(e => e.commands.includes(cmdName));
+  }
+
+  if (!entry) {
+    console.error(`No directory found${dirName ? ` named ${dirName}` : ` with command ${cmdName}`}`);
+    process.exit(1);
+  }
+
+  const parsed = parseLifeFile(path.join(ROOT, entry.file));
+  const cmd = parsed.commands?.[cmdName || nameArg];
+  if (!cmd) {
+    console.error(`Command ${cmdName || nameArg} not found in ${entry.name}`);
+    console.error(`Available: ${entry.commands.join(', ')}`);
+    process.exit(1);
+  }
+
+  const runTarget = typeof cmd === 'object' ? cmd.run : cmd;
+  if (!runTarget) {
+    console.error(`Command ${cmdName} has no run target`);
+    process.exit(1);
+  }
+
+  const needsApproval = typeof cmd === 'object' && cmd.requires_approval === 'true';
+  if (needsApproval) {
+    console.log(`⚠ ${entry.name}.${cmdName} requires approval (${runTarget})`);
+    console.log(`  Pass --approve to execute`);
+    if (!args.includes('--approve')) process.exit(1);
+  }
+
+  try {
+    execSync(runTarget, {
+      cwd: path.join(ROOT, entry.path),
+      stdio: 'inherit',
+    });
+  } catch (e) {
+    process.exit(e.status || 1);
+  }
+}
+
+function buildAndPrintIndex() {
+  const index = buildIndex();
+  console.log(JSON.stringify(index, null, 2));
+}
+
+function help() {
+  console.log(`life 0.1 — repo convention for agent-legible infra
+
+Commands:
+  life status              Current state of the Life repo
+  life explain <path>      What governs this path
+  life check [dir]         Verify interfaces against reality
+  life index               Print the full index as JSON
+  life run <dir.cmd>       Execute a named command
+  life help                This message`);
+}

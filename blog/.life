@@ -1,0 +1,25 @@
+life: 0.1
+name: blog
+summary: Static site that builds to HTML
+
+requires:
+  - infra.compute
+  - infra.route: public
+
+provides:
+  - blog.preview
+
+commands:
+  build:
+    run: echo "building blog..."
+  dev:
+    run: echo "starting dev server..."
+
+checks:
+  - echo "blog check passed"
+
+---
+
+# Blog
+
+A static site. Builds to dist/. Deploy is push-to-main.

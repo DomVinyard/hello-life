@@ -1,0 +1,40 @@
+life: 0.1
+name: api
+summary: Backend service with a database
+
+requires:
+  - infra.compute
+  - infra.datastore
+  - infra.route
+  - infra.secret_store
+  - blog.preview
+
+provides:
+  - api.ready
+
+commands:
+  dev:
+    run: echo "starting api dev..."
+  test:
+    run: echo "tests passed"
+  migrate:
+    run: echo "migration complete"
+    requires_approval: true
+  health:
+    run: echo "healthy"
+    public: true
+    surfaces: [mcp_tool]
+
+checks:
+  - echo "api check passed"
+
+secrets:
+  - DATABASE_URL
+  - API_KEY
+
+---
+
+# API
+
+Backend service. Depends on blog.preview for content.
+Secrets: DATABASE_URL, API_KEY (set via provider).

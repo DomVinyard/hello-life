@@ -1,0 +1,12 @@
+life: 0.1
+name: hello-life
+summary: Test repo for the Life protocol
+
+---
+
+# Hello Life
+
+This is a Life repo. Before editing, run `life status`.
+Before editing a path, run `life explain <path>`.
+
+The `life` CLI is at `./life` in the repo root.

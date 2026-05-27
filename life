@@ -1,84 +1,44 @@
 #!/usr/bin/env node
+// Life 0.1 kernel — single-file distribution
+// Built: 2026-05-27T15:56:53.986Z
 
-// Life 0.1 kernel — zero dependencies
-// Parses .life files, resolves capability graph, runs commands and checks.
+(function() {
+const _modules = {};
+function _define(name, factory) { let m; _modules[name] = () => m || (m = factory()); }
+function _require(name) { if (_modules[name]) return _modules[name](); return require(name); }
 
+_define("parser", function() {
 const fs = require('fs');
 const path = require('path');
-const { execSync } = require('child_process');
-
-const ROOT = findRoot(process.cwd());
-if (!ROOT) {
-  console.error('Not a Life repo (no README.life found)');
-  process.exit(1);
-}
-
-const [,, cmd, ...args] = process.argv;
-
-const commands = {
-  status,
-  explain,
-  check,
-  index: buildAndPrintIndex,
-  run: runCommand,
-  deploy: deployCommand,
-  connect: connectCommand,
-  help,
-};
-
-if (!cmd || !commands[cmd]) {
-  help();
-  process.exit(cmd ? 1 : 0);
-}
-
-commands[cmd](...args);
-
-// --- Core ---
-
-function findRoot(dir) {
-  let d = dir;
-  while (d !== path.dirname(d)) {
-    if (fs.existsSync(path.join(d, 'README.life'))) return d;
-    d = path.dirname(d);
-  }
-  return null;
-}
 
 function parseLifeFile(filePath) {
   const raw = fs.readFileSync(filePath, 'utf-8');
   const match = raw.match(/^([\s\S]*?)---\s*\n([\s\S]*)$/);
-  let frontmatter = match ? match[1] : raw;
-  let body = match ? match[2].trim() : '';
+  const frontmatter = match ? match[1] : raw;
+  const body = match ? match[2].trim() : '';
   const parsed = parseYaml(frontmatter.trim());
   return { ...parsed, _body: body, _path: filePath };
 }
 
 function parseYaml(text) {
-  // Minimal YAML parser for the Life subset:
-  // top-level keys, string values, flat lists, nested objects (2 levels)
   const result = {};
   let currentKey = null;
   let currentSubKey = null;
-  const lines = text.split('\n');
 
-  for (const line of lines) {
+  for (const line of text.split('\n')) {
     if (line.trim() === '' || line.trim().startsWith('#')) continue;
-
     const indent = line.match(/^(\s*)/)[1].length;
 
-    // Top-level key (no indent)
     if (indent === 0) {
       const m = line.match(/^(\w[\w_-]*):\s*(.*)/);
       if (m) {
         currentKey = m[1];
         currentSubKey = null;
-        const val = m[2].trim();
-        result[currentKey] = val || undefined;
+        result[currentKey] = m[2].trim() || undefined;
       }
       continue;
     }
 
-    // List item (any indent, starts with -)
     const listMatch = line.match(/^\s+-\s+(.*)/);
     if (listMatch && currentKey) {
       if (!Array.isArray(result[currentKey])) result[currentKey] = [];
@@ -86,92 +46,76 @@ function parseYaml(text) {
       continue;
     }
 
-    // 2-space indent: sub-key of top-level (e.g., command name under commands:)
     if (indent === 2 && currentKey) {
       const m = line.match(/^\s{2}(\w[\w_-]*):\s*(.*)/);
       if (m) {
-        if (typeof result[currentKey] !== 'object' || Array.isArray(result[currentKey])) {
+        if (typeof result[currentKey] !== 'object' || Array.isArray(result[currentKey]))
           result[currentKey] = {};
-        }
         currentSubKey = m[1];
-        const val = m[2].trim();
-        if (val) {
-          result[currentKey][currentSubKey] = val;
-        } else {
-          result[currentKey][currentSubKey] = {};
-        }
+        result[currentKey][currentSubKey] = m[2].trim() || {};
       }
       continue;
     }
 
-    // 4+ indent: property of the current sub-key
     if (indent >= 4 && currentKey && currentSubKey) {
       const m = line.trim().match(/^(\w[\w_-]*):\s*(.*)/);
       if (m && typeof result[currentKey][currentSubKey] === 'object') {
         let val = m[2].trim();
-        // Parse inline lists: [mcp_tool, claude_skill]
-        if (val.startsWith('[') && val.endsWith(']')) {
+        if (val.startsWith('[') && val.endsWith(']'))
           val = val.slice(1, -1).split(',').map(s => s.trim()).filter(Boolean);
-        }
         result[currentKey][currentSubKey][m[1]] = val;
       }
       continue;
     }
   }
-
   return result;
 }
 
-function discoverLifeFiles() {
+function findRoot(dir) {
+  let d = path.resolve(dir);
+  while (d !== path.dirname(d)) {
+    if (fs.existsSync(path.join(d, 'README.life'))) return d;
+    if (fs.existsSync(path.join(d, '.dna'))) return d;
+    d = path.dirname(d);
+  }
+  return null;
+}
+
+function discoverLifeFiles(root) {
   const files = [];
-  function walk(dir, depth = 0) {
+  const readme = path.join(root, 'README.life');
+  if (fs.existsSync(readme)) files.push(readme);
+
+  function walk(dir, depth) {
     if (depth > 5) return;
     const base = path.basename(dir);
-    if (base === 'node_modules' || base === '.git' || base === 'dist') return;
+    if (['node_modules', '.git', 'dist', '.dna'].includes(base)) return;
 
-    const lifePath = path.join(dir, '.life');
-    if (dir !== ROOT && fs.existsSync(lifePath) && fs.statSync(lifePath).isFile()) {
-      files.push(lifePath);
-    }
-
-    // Check .life/lib/ for installed libraries
-    const libDir = path.join(dir, '.life', 'lib');
-    if (fs.existsSync(libDir) && fs.statSync(libDir).isDirectory()) {
-      for (const entry of fs.readdirSync(libDir)) {
-        const lf = path.join(libDir, entry, '.life');
-        if (fs.existsSync(lf) && fs.statSync(lf).isFile()) {
-          files.push(lf);
-        }
-      }
+    if (dir !== root) {
+      const lf = path.join(dir, '.life');
+      if (fs.existsSync(lf) && fs.statSync(lf).isFile()) files.push(lf);
     }
 
     try {
       for (const entry of fs.readdirSync(dir)) {
-        const full = path.join(dir, entry);
         if (entry.startsWith('.') && entry !== '.life') continue;
+        const full = path.join(dir, entry);
         if (fs.statSync(full).isDirectory()) walk(full, depth + 1);
       }
     } catch {}
   }
-
-  // README.life is the root .life file
-  const rootLife = path.join(ROOT, 'README.life');
-  if (fs.existsSync(rootLife)) files.push(rootLife);
-
-  walk(ROOT);
+  walk(root, 0);
   return files;
 }
 
-function buildIndex() {
-  const files = discoverLifeFiles();
-  const entries = [];
-  for (const f of files) {
+function buildIndex(root) {
+  return discoverLifeFiles(root).map(f => {
     try {
       const parsed = parseLifeFile(f);
-      const relPath = path.relative(ROOT, path.dirname(f));
-      entries.push({
+      const relPath = path.relative(root, f === path.join(root, 'README.life') ? root : path.dirname(f));
+      return {
         path: relPath || '.',
-        file: path.relative(ROOT, f),
+        file: path.relative(root, f),
         name: parsed.name || path.basename(relPath || '.'),
         summary: parsed.summary || '',
         requires: parsed.requires || [],
@@ -179,389 +123,523 @@ function buildIndex() {
         commands: parsed.commands ? Object.keys(parsed.commands) : [],
         checks: parsed.checks || [],
         secrets: parsed.secrets || [],
-      });
+        _parsed: parsed,
+      };
     } catch (e) {
-      console.error(`Warning: failed to parse ${f}: ${e.message}`);
+      console.error(`Warning: ${f}: ${e.message}`);
+      return null;
     }
-  }
-  return entries;
+  }).filter(Boolean);
 }
 
+return { parseLifeFile, findRoot, discoverLifeFiles, buildIndex };
+
+});
+
+_define("graph", function() {
 function resolveGraph(index) {
-  const provided = new Map(); // capability → provider entry
-  const missing = []; // { dir, capability }
+  const provided = new Map();
+  const missing = [];
   const warnings = [];
 
-  // Collect all provides
   for (const entry of index) {
     for (const cap of entry.provides || []) {
-      if (provided.has(cap)) {
-        warnings.push(`Ambiguous provider: ${cap} provided by both ${provided.get(cap).name} and ${entry.name}`);
-      }
+      if (provided.has(cap))
+        warnings.push(`Ambiguous: ${cap} from ${provided.get(cap).name} and ${entry.name}`);
       provided.set(cap, entry);
     }
   }
 
-  // Check all requires
   for (const entry of index) {
     for (const rawCap of entry.requires || []) {
       const cap = rawCap.replace(/:\s*public$/, '');
-      if (!provided.has(cap)) {
+      if (!provided.has(cap))
         missing.push({ dir: entry.name, capability: cap, raw: rawCap });
-      }
     }
   }
 
   return { provided, missing, warnings };
 }
 
-// --- Commands ---
+function dependentsOf(name, index) {
+  return index.filter(e =>
+    (e.requires || []).some(r => r.replace(/:\s*public$/, '').startsWith(name + '.'))
+  );
+}
 
-function status() {
-  const index = buildIndex();
-  const { missing, warnings } = resolveGraph(index);
+return { resolveGraph, dependentsOf };
 
-  console.log(`Life repo: ${ROOT}`);
-  console.log(`Living directories: ${index.length}`);
-  console.log(`Capabilities provided: ${[...new Set(index.flatMap(e => e.provides))].length}`);
-  console.log(`Capabilities required: ${[...new Set(index.flatMap(e => e.requires))].length}`);
+});
 
-  if (missing.length) {
-    console.log(`\nUnresolved (${missing.length}):`);
-    for (const m of missing) {
-      console.log(`  ✗ ${m.dir} requires ${m.raw}`);
-    }
-  } else {
-    console.log(`\nAll capabilities resolved.`);
-  }
+_define("cloudflare", function() {
+const fs = require('fs');
+const path = require('path');
 
-  if (warnings.length) {
-    console.log(`\nWarnings:`);
-    for (const w of warnings) console.log(`  ⚠ ${w}`);
+const ID = 'cloudflare';
+
+function detect() {
+  return !!(process.env.CLOUDFLARE_API_TOKEN && process.env.CLOUDFLARE_ACCOUNT_ID);
+}
+
+function headers() {
+  return { 'Authorization': `Bearer ${process.env.CLOUDFLARE_API_TOKEN}` };
+}
+
+function accountUrl(p) {
+  return `https://api.cloudflare.com/client/v4/accounts/${process.env.CLOUDFLARE_ACCOUNT_ID}${p || ''}`;
+}
+
+async function connect() {
+  const token = process.env.CLOUDFLARE_API_TOKEN;
+  const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
+
+  if (!token) return { ok: false, error: 'CLOUDFLARE_API_TOKEN not set' };
+  if (!accountId) return { ok: false, error: 'CLOUDFLARE_ACCOUNT_ID not set' };
+
+  // cfat_ tokens fail /user/tokens/verify — use account endpoint instead
+  try {
+    const res = await fetch(accountUrl(), { headers: headers() });
+    const data = await res.json();
+    if (!data.success)
+      return { ok: false, error: data.errors?.[0]?.message || 'Account not accessible' };
+    return { ok: true, account: data.result.name };
+  } catch (e) {
+    return { ok: false, error: e.message };
   }
 }
 
-function explain(target) {
-  if (!target) {
-    console.error('Usage: life explain <path>');
-    process.exit(1);
+async function deploy(dir, entry) {
+  const workerPath = path.join(dir, 'src', 'worker.js');
+  if (!fs.existsSync(workerPath))
+    return { ok: false, error: `No src/worker.js in ${dir}` };
+
+  const code = fs.readFileSync(workerPath, 'utf-8');
+  const name = entry.name;
+
+  const formData = new FormData();
+  formData.append('metadata', new Blob([JSON.stringify({
+    main_module: 'worker.js',
+    compatibility_date: '2024-01-01',
+  })], { type: 'application/json' }));
+  formData.append('worker.js', new Blob([code], { type: 'application/javascript+module' }), 'worker.js');
+
+  try {
+    const res = await fetch(accountUrl(`/workers/scripts/${name}`), {
+      method: 'PUT',
+      headers: headers(),
+      body: formData,
+    });
+    const data = await res.json();
+    if (!data.success)
+      return { ok: false, error: JSON.stringify(data.errors) };
+    return { ok: true, message: `Worker "${name}" deployed` };
+  } catch (e) {
+    return { ok: false, error: e.message };
   }
+}
 
-  const targetPath = path.resolve(target);
-  const index = buildIndex();
-  const { provided, missing } = resolveGraph(index);
+async function check(entry) {
+  const results = [];
 
-  // Find the nearest .life file for this path (exclude root unless exact match)
-  let best = null;
-  for (const entry of index) {
-    if (entry.path === '.') continue; // skip root for path lookups
-    const entryPath = path.resolve(ROOT, entry.path);
-    if (targetPath.startsWith(entryPath)) {
-      if (!best || entry.path.length > best.path.length) {
-        best = entry;
-      }
+  // Check if Worker exists
+  if ((entry.requires || []).some(r => r.includes('infra.compute'))) {
+    try {
+      const res = await fetch(accountUrl(`/workers/scripts/${entry.name}`), { headers: headers() });
+      const data = await res.json();
+      results.push({
+        check: `Worker "${entry.name}"`,
+        ok: data.success,
+        detail: data.success ? 'exists' : 'not deployed',
+      });
+    } catch (e) {
+      results.push({ check: `Worker "${entry.name}"`, ok: false, detail: e.message });
     }
   }
 
-  if (!best) {
-    console.log(`No .life file governs ${path.relative(ROOT, targetPath)}`);
-    return;
+  // Check secrets
+  for (const secret of entry.secrets || []) {
+    results.push({
+      check: `secret ${secret}`,
+      ok: !!process.env[secret],
+      detail: process.env[secret] ? 'set in env' : 'not set',
+    });
   }
 
-  const parsed = parseLifeFile(path.join(ROOT, best.file));
+  return results;
+}
 
-  console.log(`${best.name}: ${best.summary}`);
-  console.log();
+async function teardown(entry) {
+  try {
+    const res = await fetch(accountUrl(`/workers/scripts/${entry.name}`), {
+      method: 'DELETE',
+      headers: headers(),
+    });
+    const data = await res.json();
+    return { ok: data.success, message: data.success ? `Worker "${entry.name}" deleted` : 'Failed' };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
+return { ID, detect, connect, deploy, check, teardown };
+
+});
+
+_define("claude-code", function() {
+const fs = require('fs');
+const path = require('path');
+
+const ID = 'claude-code';
+
+function detect() {
+  return !!(process.env.CLAUDE_CODE || process.env.CLAUDE_CODE_OAUTH_TOKEN || process.env.USER === 'claude');
+}
+
+function reconcile(root, index) {
+  const generated = [];
+
+  // Generate CLAUDE.md from all .life files
+  let md = '# Generated by Life\n\n';
+  md += 'This file is generated from `.life` files. Do not edit directly.\n';
+  md += 'To change, edit the relevant `.life` file and run `life reconcile`.\n\n';
+
+  for (const entry of index) {
+    if (entry.path === '.') continue;
+    md += `## ${entry.name}\n\n`;
+    if (entry.summary) md += `${entry.summary}\n\n`;
+    if (entry.commands.length) {
+      md += 'Commands:\n';
+      const cmds = entry._parsed?.commands || {};
+      for (const name of entry.commands) {
+        const cmd = cmds[name];
+        const run = typeof cmd === 'object' ? cmd.run : cmd;
+        const approval = (typeof cmd === 'object' && cmd.requires_approval === 'true') ? ' (requires approval)' : '';
+        md += `- \`${name}\`: \`${run}\`${approval}\n`;
+      }
+      md += '\n';
+    }
+    if (entry._parsed?._body) {
+      md += entry._parsed._body + '\n\n';
+    }
+  }
+
+  const claudeMdPath = path.join(root, 'CLAUDE.md');
+  fs.writeFileSync(claudeMdPath, md);
+  generated.push('CLAUDE.md');
+
+  return generated;
+}
+
+return { ID, detect, reconcile };
+
+});
+
+_define("codex", function() {
+const fs = require('fs');
+const path = require('path');
+
+const ID = 'codex';
+
+function detect() {
+  return !!(process.env.CODEX || process.env.OPENAI_API_KEY);
+}
+
+function reconcile(root, index) {
+  const generated = [];
+
+  let md = '# Generated by Life\n\n';
+  md += 'This file is generated from `.life` files. Do not edit directly.\n\n';
+
+  for (const entry of index) {
+    if (entry.path === '.') continue;
+    md += `## ${entry.name}\n\n`;
+    if (entry.summary) md += `${entry.summary}\n\n`;
+    if (entry._parsed?._body) md += entry._parsed._body + '\n\n';
+  }
+
+  fs.writeFileSync(path.join(root, 'AGENTS.md'), md);
+  generated.push('AGENTS.md');
+  return generated;
+}
+
+return { ID, detect, reconcile };
+
+});
+
+
+const path = require('path');
+const { execSync } = require('child_process');
+const { parseLifeFile, findRoot, buildIndex } = _require("parser");
+const { resolveGraph, dependentsOf } = _require("graph");
+
+// Adapters — built into the kernel
+const infraAdapters = [_require("cloudflare")];
+const harnessAdapters = [_require("claude-code"), _require("codex")];
+
+const ROOT = findRoot(process.cwd());
+if (!ROOT) {
+  console.error('Not a Life repo (no README.life or .dna/ found)');
+  process.exit(1);
+}
+
+const [,, cmd, ...args] = process.argv;
+const commands = { status, explain, check, index: printIndex, run: runCmd, deploy, connect, reconcile, teardown, help };
+
+if (!cmd || !commands[cmd]) { help(); process.exit(cmd ? 1 : 0); }
+Promise.resolve(commands[cmd](...args)).catch(e => { console.error(e.message); process.exit(1); });
+
+// --- Detect environment ---
+
+function detectInfra() {
+  return infraAdapters.find(a => a.detect());
+}
+
+function detectHarness() {
+  return harnessAdapters.find(a => a.detect());
+}
+
+// --- Commands ---
+
+function status() {
+  const index = buildIndex(ROOT);
+  const { missing, warnings } = resolveGraph(index);
+  const infra = detectInfra();
+  const harness = detectHarness();
+
+  console.log(`Life repo: ${path.basename(ROOT)}`);
+  console.log(`Directories: ${index.filter(e => e.path !== '.').length}`);
+  console.log(`Infra: ${infra ? infra.ID + ' (detected)' : 'none (set CLOUDFLARE_API_TOKEN)'}`);
+  console.log(`Harness: ${harness ? harness.ID + ' (detected)' : 'none'}`);
+
+  if (missing.length) {
+    const infraMissing = missing.filter(m => m.capability.startsWith('infra.'));
+    const otherMissing = missing.filter(m => !m.capability.startsWith('infra.'));
+    if (infraMissing.length && !infra)
+      console.log(`\n${infraMissing.length} infra capabilities unresolved — connect a provider`);
+    if (otherMissing.length) {
+      console.log(`\nUnresolved:`);
+      otherMissing.forEach(m => console.log(`  ✗ ${m.dir} requires ${m.raw}`));
+    }
+  }
+  if (missing.length === 0) console.log(`\nAll capabilities resolved.`);
+}
+
+function explain(target) {
+  if (!target) { console.error('Usage: life explain <path>'); process.exit(1); }
+
+  const index = buildIndex(ROOT);
+  const { provided } = resolveGraph(index);
+  const targetPath = path.resolve(target);
+
+  let best = null;
+  for (const entry of index) {
+    if (entry.path === '.') continue;
+    const ep = path.resolve(ROOT, entry.path);
+    if (targetPath.startsWith(ep) && (!best || entry.path.length > best.path.length))
+      best = entry;
+  }
+
+  if (!best) { console.log(`No .life file governs ${path.relative(ROOT, targetPath)}`); return; }
+
+  const parsed = parseLifeFile(path.join(ROOT, best.file));
+  console.log(`${best.name}: ${best.summary}\n`);
 
   if (best.requires.length) {
     console.log('Requires:');
-    for (const r of best.requires) {
+    best.requires.forEach(r => {
       const cap = r.replace(/:\s*public$/, '');
       const provider = provided.get(cap);
-      const isPublic = r.includes(': public');
-      const status = provider ? `✓ (${provider.name})` : '✗ not provided';
-      console.log(`  ${r} — ${status}`);
-    }
+      const infra = detectInfra();
+      const resolved = provider ? `✓ (${provider.name})` :
+        (cap.startsWith('infra.') && infra) ? `✓ (${infra.ID})` : '✗ not provided';
+      console.log(`  ${r} — ${resolved}`);
+    });
     console.log();
   }
 
-  if (best.provides.length) {
-    console.log('Provides: ' + best.provides.join(', '));
-    console.log();
-  }
+  if (best.provides.length) console.log('Provides: ' + best.provides.join(', ') + '\n');
 
   if (best.commands.length) {
     console.log('Commands:');
     const cmds = parsed.commands || {};
-    for (const name of best.commands) {
+    best.commands.forEach(name => {
       const cmd = cmds[name];
-      const desc = typeof cmd === 'object' ? (cmd.run || '') : (cmd || '');
-      const approval = (typeof cmd === 'object' && cmd.requires_approval === 'true') ? ' [requires approval]' : '';
-      const pub = (typeof cmd === 'object' && cmd.public === 'true') ? ' [public]' : '';
-      console.log(`  ${name}: ${desc}${approval}${pub}`);
-    }
+      const run = typeof cmd === 'object' ? cmd.run : cmd;
+      const flags = [];
+      if (typeof cmd === 'object') {
+        if (cmd.requires_approval === 'true') flags.push('requires approval');
+        if (cmd.public === 'true') flags.push('public');
+      }
+      console.log(`  ${name}: ${run}${flags.length ? ` [${flags.join(', ')}]` : ''}`);
+    });
     console.log();
   }
 
-  if (best.secrets.length) {
-    console.log('Secrets: ' + best.secrets.join(', '));
-    console.log();
-  }
-
-  if (parsed._body) {
-    console.log(parsed._body);
-  }
+  if (best.secrets.length) console.log('Secrets: ' + best.secrets.join(', ') + '\n');
+  if (parsed._body) console.log(parsed._body);
 }
 
 function check(target) {
-  const index = buildIndex();
-  const { missing, warnings } = resolveGraph(index);
-  let failures = 0;
-  let passes = 0;
+  const index = buildIndex(ROOT);
+  const { provided, missing, warnings } = resolveGraph(index);
+  const infra = detectInfra();
+  let failures = 0, passes = 0;
 
-  // Filter to target if specified
   const entries = target
     ? index.filter(e => e.name === target || e.path === target || e.path.endsWith('/' + target))
-    : index;
+    : index.filter(e => e.path !== '.');
 
-  if (target && entries.length === 0) {
-    console.error(`No .life file found for: ${target}`);
-    process.exit(1);
-  }
+  if (target && !entries.length) { console.error(`Not found: ${target}`); process.exit(1); }
 
   for (const entry of entries) {
     console.log(`\n── ${entry.name} (${entry.path}) ──`);
 
-    // Check capabilities
     for (const rawCap of entry.requires) {
       const cap = rawCap.replace(/:\s*public$/, '');
-      const isMissing = missing.some(m => m.dir === entry.name && m.capability === cap);
-      if (isMissing) {
-        console.log(`  ✗ requires ${rawCap} — not provided`);
-        failures++;
-      } else {
-        console.log(`  ✓ requires ${rawCap}`);
-        passes++;
-      }
+      const fromDir = provided.get(cap);
+      const fromInfra = cap.startsWith('infra.') && infra;
+      if (fromDir) { console.log(`  ✓ ${rawCap} (${fromDir.name})`); passes++; }
+      else if (fromInfra) { console.log(`  ✓ ${rawCap} (${infra.ID})`); passes++; }
+      else { console.log(`  ✗ ${rawCap} — not provided`); failures++; }
     }
 
-    // Check secrets
     for (const secret of entry.secrets) {
-      if (process.env[secret]) {
-        console.log(`  ✓ secret ${secret} — set`);
-        passes++;
-      } else {
-        console.log(`  ✗ secret ${secret} — not set`);
-        failures++;
-      }
+      if (process.env[secret]) { console.log(`  ✓ secret ${secret}`); passes++; }
+      else { console.log(`  ✗ secret ${secret} — not set`); failures++; }
     }
 
-    // Run checks
     for (const rawCheck of entry.checks) {
       const checkCmd = typeof rawCheck === 'string' ? rawCheck : rawCheck.run;
       if (!checkCmd) continue;
       try {
-        execSync(checkCmd, {
-          cwd: path.join(ROOT, entry.path),
-          stdio: 'pipe',
-          timeout: 30000,
-        });
-        console.log(`  ✓ check: ${checkCmd}`);
-        passes++;
-      } catch (e) {
-        console.log(`  ✗ check: ${checkCmd} — failed`);
-        failures++;
-      }
+        execSync(checkCmd, { cwd: path.join(ROOT, entry.path), stdio: 'pipe', timeout: 30000 });
+        console.log(`  ✓ ${checkCmd}`); passes++;
+      } catch { console.log(`  ✗ ${checkCmd}`); failures++; }
     }
 
-    // Warn on dangerous combos
-    const hasPubRoute = entry.requires.some(r => r.includes('public'));
+    // Dangerous combo warnings
+    const hasPub = entry.requires.some(r => r.includes('public'));
     const hasCommit = entry.requires.includes('storage.commit');
     const hasAuth = entry.requires.some(r => r.startsWith('auth.'));
-    const hasLifeAgent = entry.requires.includes('life.agent');
-
-    if (hasPubRoute && hasCommit && !hasAuth) {
-      console.log(`  ⚠ public route + storage.commit without auth — review exposure`);
-    }
-    if (hasLifeAgent) {
-      console.log(`  ⚠ life.agent — this directory can spawn agent sessions and modify code`);
-    }
+    const hasAgent = entry.requires.includes('life.agent');
+    if (hasPub && hasCommit && !hasAuth)
+      console.log(`  ⚠ public + storage.commit without auth`);
+    if (hasAgent)
+      console.log(`  ⚠ life.agent — can spawn sessions and modify code`);
   }
 
-  console.log(`\n${passes} passed, ${failures} failed${warnings.length ? `, ${warnings.length} warnings` : ''}`);
-
-  for (const w of warnings) console.log(`  ⚠ ${w}`);
-
-  if (missing.length && !target) {
-    console.log(`\nTo resolve missing capabilities:`);
-    const infraMissing = missing.filter(m => m.capability.startsWith('infra.'));
-    const otherMissing = missing.filter(m => !m.capability.startsWith('infra.'));
-    if (infraMissing.length) console.log(`  Install an infra adapter: life install cloudflare`);
-    if (otherMissing.length) {
-      for (const m of otherMissing) {
-        console.log(`  ${m.dir} requires ${m.capability} — install a library that provides it`);
-      }
-    }
-  }
-
+  console.log(`\n${passes} passed, ${failures} failed`);
+  warnings.forEach(w => console.log(`⚠ ${w}`));
   process.exit(failures > 0 ? 1 : 0);
 }
 
-function runCommand(nameArg) {
-  if (!nameArg) {
-    console.error('Usage: life run <directory.command>');
-    process.exit(1);
-  }
-
-  const [dirName, cmdName] = nameArg.includes('.')
-    ? nameArg.split('.', 2)
-    : [null, nameArg];
-
-  const index = buildIndex();
-
-  let entry;
-  if (dirName) {
-    entry = index.find(e => e.name === dirName);
-  } else {
-    // Find a directory that has this command
-    entry = index.find(e => e.commands.includes(cmdName));
-  }
-
-  if (!entry) {
-    console.error(`No directory found${dirName ? ` named ${dirName}` : ` with command ${cmdName}`}`);
-    process.exit(1);
-  }
+function runCmd(nameArg) {
+  if (!nameArg) { console.error('Usage: life run <dir.command>'); process.exit(1); }
+  const [dirName, cmdName] = nameArg.includes('.') ? nameArg.split('.', 2) : [null, nameArg];
+  const index = buildIndex(ROOT);
+  const entry = dirName ? index.find(e => e.name === dirName) : index.find(e => e.commands.includes(cmdName));
+  if (!entry) { console.error(`Not found: ${nameArg}`); process.exit(1); }
 
   const parsed = parseLifeFile(path.join(ROOT, entry.file));
   const cmd = parsed.commands?.[cmdName || nameArg];
-  if (!cmd) {
-    console.error(`Command ${cmdName || nameArg} not found in ${entry.name}`);
-    console.error(`Available: ${entry.commands.join(', ')}`);
-    process.exit(1);
-  }
+  if (!cmd) { console.error(`Command ${cmdName} not in ${entry.name}. Have: ${entry.commands.join(', ')}`); process.exit(1); }
 
   const runTarget = typeof cmd === 'object' ? cmd.run : cmd;
-  if (!runTarget) {
-    console.error(`Command ${cmdName} has no run target`);
+  if (typeof cmd === 'object' && cmd.requires_approval === 'true' && !args.includes('--approve')) {
+    console.log(`⚠ ${entry.name}.${cmdName} requires approval. Pass --approve.`);
     process.exit(1);
   }
 
-  const needsApproval = typeof cmd === 'object' && cmd.requires_approval === 'true';
-  if (needsApproval) {
-    console.log(`⚠ ${entry.name}.${cmdName} requires approval (${runTarget})`);
-    console.log(`  Pass --approve to execute`);
-    if (!args.includes('--approve')) process.exit(1);
-  }
-
-  try {
-    execSync(runTarget, {
-      cwd: path.join(ROOT, entry.path),
-      stdio: 'inherit',
-    });
-  } catch (e) {
-    process.exit(e.status || 1);
-  }
+  try { execSync(runTarget, { cwd: path.join(ROOT, entry.path), stdio: 'inherit' }); }
+  catch (e) { process.exit(e.status || 1); }
 }
 
-function buildAndPrintIndex() {
-  const index = buildIndex();
-  console.log(JSON.stringify(index, null, 2));
+async function deploy(target) {
+  if (!target) { console.error('Usage: life deploy <directory>'); process.exit(1); }
+  const infra = detectInfra();
+  if (!infra) { console.error('No infra provider detected. Set CLOUDFLARE_API_TOKEN.'); process.exit(1); }
+
+  const index = buildIndex(ROOT);
+  const entry = index.find(e => e.name === target || e.path === target);
+  if (!entry) { console.error(`Not found: ${target}`); process.exit(1); }
+
+  console.log(`Deploying ${entry.name} via ${infra.ID}...`);
+  const result = await infra.deploy(path.join(ROOT, entry.path), entry);
+  if (result.ok) console.log(`✓ ${result.message}`);
+  else { console.error(`✗ ${result.error}`); process.exit(1); }
 }
 
-function deployCommand(target) {
-  if (!target) {
-    console.error('Usage: life deploy <directory>');
-    process.exit(1);
-  }
-
-  const index = buildIndex();
-  const entry = index.find(e => e.name === target || e.path === target || e.path.endsWith('/' + target));
-
-  if (!entry) {
-    console.error(`No .life file found for: ${target}`);
-    process.exit(1);
-  }
-
-  // Find an infra adapter that provides infra.compute
-  const adapter = index.find(e =>
-    (e.provides || []).includes('infra.compute') &&
-    e.commands.includes('deploy')
-  );
-
+async function connect(name) {
+  if (!name) { console.error('Usage: life connect <provider>'); process.exit(1); }
+  const adapter = infraAdapters.find(a => a.ID === name);
   if (!adapter) {
-    console.error('No infra adapter with deploy capability installed.');
-    console.error('Install one: e.g., add a cloudflare adapter to .life/lib/');
+    console.error(`Unknown provider: ${name}. Available: ${infraAdapters.map(a => a.ID).join(', ')}`);
     process.exit(1);
   }
 
-  const adapterParsed = parseLifeFile(path.join(ROOT, adapter.file));
-  const deployCmd = adapterParsed.commands?.deploy;
-  const runTarget = typeof deployCmd === 'object' ? deployCmd.run : deployCmd;
+  const result = await adapter.connect();
+  if (result.ok) console.log(`✓ Connected to ${name}${result.account ? ': ' + result.account : ''}`);
+  else { console.error(`✗ ${result.error}`); process.exit(1); }
+}
 
-  if (!runTarget) {
-    console.error(`Adapter ${adapter.name} has no deploy run target`);
-    process.exit(1);
-  }
+function reconcile() {
+  const index = buildIndex(ROOT);
+  const harness = detectHarness();
 
-  const targetDir = path.join(ROOT, entry.path);
-  console.log(`Deploying ${entry.name} via ${adapter.name} adapter...`);
-
-  try {
-    execSync(`${runTarget} ${targetDir}`, {
-      cwd: path.join(ROOT, adapter.path),
-      stdio: 'inherit',
-      env: { ...process.env, LIFE_TARGET: targetDir, LIFE_TARGET_NAME: entry.name },
+  if (harness) {
+    const files = harness.reconcile(ROOT, index);
+    files.forEach(f => console.log(`Generated: ${f}`));
+  } else {
+    // Generate all if no harness detected
+    harnessAdapters.forEach(h => {
+      const files = h.reconcile(ROOT, index);
+      files.forEach(f => console.log(`Generated: ${f}`));
     });
-  } catch (e) {
-    process.exit(e.status || 1);
   }
 }
 
-function connectCommand(adapterName) {
-  if (!adapterName) {
-    console.error('Usage: life connect <adapter>');
+async function teardown(target) {
+  if (!target) { console.error('Usage: life teardown <directory>'); process.exit(1); }
+  const infra = detectInfra();
+  if (!infra) { console.error('No infra provider.'); process.exit(1); }
+  if (!args.includes('--confirm')) {
+    console.log(`⚠ life teardown is destructive. Pass --confirm to proceed.`);
+    const index = buildIndex(ROOT);
+    const deps = dependentsOf(target, index);
+    if (deps.length) {
+      console.log(`\nThese directories depend on ${target}:`);
+      deps.forEach(d => console.log(`  ${d.name}`));
+    }
     process.exit(1);
   }
 
-  const index = buildIndex();
-  const adapter = index.find(e => e.name === adapterName);
+  const index = buildIndex(ROOT);
+  const entry = index.find(e => e.name === target);
+  if (!entry) { console.error(`Not found: ${target}`); process.exit(1); }
 
-  if (!adapter) {
-    console.error(`No adapter named ${adapterName} found.`);
-    console.error('Installed adapters: ' + index.filter(e => e.file.includes('.life/lib/')).map(e => e.name).join(', '));
-    process.exit(1);
-  }
+  const result = await infra.teardown(entry);
+  if (result.ok) console.log(`✓ ${result.message}`);
+  else { console.error(`✗ ${result.error}`); process.exit(1); }
+}
 
-  const parsed = parseLifeFile(path.join(ROOT, adapter.file));
-  const connectCmd = parsed.commands?.connect;
-  const runTarget = typeof connectCmd === 'object' ? connectCmd.run : connectCmd;
-
-  if (!runTarget) {
-    console.error(`Adapter ${adapterName} has no connect command`);
-    process.exit(1);
-  }
-
-  try {
-    execSync(runTarget, {
-      cwd: path.join(ROOT, adapter.path),
-      stdio: 'inherit',
-      env: process.env,
-    });
-  } catch (e) {
-    process.exit(e.status || 1);
-  }
+function printIndex() {
+  console.log(JSON.stringify(buildIndex(ROOT).map(({ _parsed, ...e }) => e), null, 2));
 }
 
 function help() {
   console.log(`life 0.1 — repo convention for agent-legible infra
 
 Commands:
-  life status              Current state of the Life repo
-  life explain <path>      What governs this path
-  life check [dir]         Verify interfaces against reality
-  life index               Print the full index as JSON
-  life run <dir.cmd>       Execute a named command
-  life deploy <dir>        Deploy via infra adapter
-  life connect <adapter>   Connect and verify an adapter
-  life help                This message`);
+  life status            Current state
+  life explain <path>    What governs this path
+  life check [dir]       Verify against reality
+  life index             Print the index
+  life run <dir.cmd>     Execute a command
+  life deploy <dir>      Deploy via infra provider
+  life connect <name>    Connect an infra provider
+  life reconcile         Generate harness files
+  life teardown <dir>    Destroy infra (--confirm)
+  life help              This message`);
 }
+
+})();

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Life 0.1 kernel — single-file distribution
-// Built: 2026-05-28T14:06:36.498Z
+// Built: 2026-05-28T14:13:53.357Z
 
 (function() {
 const _modules = {};
@@ -1006,11 +1006,12 @@ async function teardown(target) {
   if (liveConsumers.length && !args.includes('--force')) {
     console.error(`✗ Cannot teardown ${target} — live consumers would break:`);
     liveConsumers.forEach(c => console.error(`  ${c.dir} requires ${c.cap}`));
-    console.error(`\nTeardown consumers first, or override:  ./.life.core teardown ${target} --confirm --force`);
+    console.error(`\nTeardown consumers first, or override:  ./.life.core teardown ${target} --force`);
     process.exit(1);
   }
 
-  if (!args.includes('--confirm')) {
+  // --force implies --confirm. Skip the prompt when forcing.
+  if (!args.includes('--confirm') && !args.includes('--force')) {
     console.log(`⚠ ./.life.core teardown ${target} is destructive. Pass --confirm to proceed.`);
     if (consumers.length) {
       console.log(`\nDirectories that declare a dependency on ${target}:`);
@@ -1029,26 +1030,32 @@ function depsCmd(target) {
   const { provided } = resolveGraph(index);
   const dirs = index.filter(e => e.path !== '.');
 
+  // Helper: format `← capability (source)` consistently
+  function reqLine(rawCap) {
+    const cap = rawCap.replace(/:\s*public$/, '');
+    const provider = provided.get(cap);
+    const source = provider ? provider.name : 'infra';
+    return `← ${rawCap} (${source})`;
+  }
+
+  // Helper: format `→ capability (consumers or "unused")`
+  function provLine(p) {
+    const consumers = dirs.filter(d =>
+      (d.requires || []).some(r => r.replace(/:\s*public$/, '') === p)
+    );
+    const tag = consumers.length ? consumers.map(c => c.name).join(', ') : 'unused';
+    return `→ ${p} (${tag})`;
+  }
+
   if (!target) {
-    // No arg: show the whole dep graph
     console.log('Capability graph:');
     for (const entry of dirs) {
       const requires = entry.requires || [];
       const provides = entry.provides || [];
       if (!requires.length && !provides.length) continue;
       console.log(`\n  ${entry.name}`);
-      requires.forEach(r => {
-        const cap = r.replace(/:\s*public$/, '');
-        const provider = provided.get(cap);
-        console.log(`    ← ${r}${provider ? ' (from ' + provider.name + ')' : ' (infra)'}`);
-      });
-      provides.forEach(p => {
-        const consumers = dirs.filter(d =>
-          (d.requires || []).some(r => r.replace(/:\s*public$/, '') === p)
-        );
-        const tag = consumers.length ? consumers.map(c => c.name).join(', ') : 'unused';
-        console.log(`    → ${p} (${tag})`);
-      });
+      requires.forEach(r => console.log(`    ${reqLine(r)}`));
+      provides.forEach(p => console.log(`    ${provLine(p)}`));
     }
     return;
   }
@@ -1060,26 +1067,13 @@ function depsCmd(target) {
 
   if (entry.requires.length) {
     console.log('Requires (depends on):');
-    entry.requires.forEach(r => {
-      const cap = r.replace(/:\s*public$/, '');
-      const provider = provided.get(cap);
-      console.log(`  ← ${r}${provider ? ' from ' + provider.name : ' (infra)'}`);
-    });
+    entry.requires.forEach(r => console.log(`  ${reqLine(r)}`));
     console.log();
   }
 
   if (entry.provides.length) {
     console.log('Provides (consumed by):');
-    entry.provides.forEach(p => {
-      const consumers = dirs.filter(d =>
-        (d.requires || []).some(r => r.replace(/:\s*public$/, '') === p)
-      );
-      if (consumers.length === 0) {
-        console.log(`  → ${p} (unused — no consumers)`);
-      } else {
-        consumers.forEach(c => console.log(`  → ${p} → ${c.name}`));
-      }
-    });
+    entry.provides.forEach(p => console.log(`  ${provLine(p)}`));
   }
 }
 

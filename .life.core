@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Life 0.1 kernel — single-file distribution
-// Built: 2026-05-28T13:43:02.196Z
+// Built: 2026-05-28T13:51:03.659Z
 
 (function() {
 const _modules = {};
@@ -274,10 +274,10 @@ async function urlFor(entry) {
 
 async function setSecret(entry, name, value) {
   try {
-    // First ensure the worker exists (Cloudflare requires a deployed worker to bind secrets to)
-    const checkRes = await fetch(accountUrl(`/workers/scripts/${entry.name}`), { headers: headers() });
-    if (!(await checkRes.json()).success) {
-      return { ok: false, error: `Deploy ${entry.name} first before setting secrets.` };
+    // /settings returns JSON; /workers/scripts/{n} returns multipart script bytes
+    const checkRes = await fetch(accountUrl(`/workers/scripts/${entry.name}/settings`), { headers: headers() });
+    if (checkRes.status === 404) {
+      return { ok: false, error: `Deploy ${entry.name} first, then set secrets.` };
     }
     const res = await fetch(accountUrl(`/workers/scripts/${entry.name}/secrets`), {
       method: 'PUT',
@@ -289,6 +289,19 @@ async function setSecret(entry, name, value) {
     return { ok: true, message: `${name} set on ${entry.name}` };
   } catch (e) {
     return { ok: false, error: e.message };
+  }
+}
+
+async function listSecrets(entry) {
+  // Returns array of secret names bound to the deployed worker, or null if worker doesn't exist
+  try {
+    const res = await fetch(accountUrl(`/workers/scripts/${entry.name}/secrets`), { headers: headers() });
+    if (res.status === 404) return null;
+    const data = await res.json();
+    if (!data.success) return null;
+    return (data.result || []).map(s => s.name);
+  } catch {
+    return null;
   }
 }
 
@@ -335,7 +348,7 @@ async function teardown(entry) {
   }
 }
 
-return { ID, detect, connect, deploy, check, teardown, urlFor, setSecret };
+return { ID, detect, connect, deploy, check, teardown, urlFor, setSecret, listSecrets };
 
 });
 
@@ -554,14 +567,27 @@ function explain(target) {
   if (parsed._body) console.log(parsed._body);
 }
 
-function check(target) {
+async function check(target) {
   const index = buildIndex(ROOT);
   const { provided, warnings } = resolveGraph(index);
   const infra = detectInfra();
   let failures = 0, passes = 0;
-  const providerFailures = new Map(); // dir name → fail count
+  const providerFailures = new Map();
+  const providerSecretLists = new Map(); // entry.name → string[] of secret names set on provider
 
-  function checkEntry(entry, depth) {
+  async function loadProviderSecrets(entry) {
+    if (providerSecretLists.has(entry.name)) return providerSecretLists.get(entry.name);
+    const usesSecretStore = entry.requires.some(r => r.replace(/:\s*public$/, '') === 'infra.secret_store');
+    if (!usesSecretStore || !infra || !infra.listSecrets) {
+      providerSecretLists.set(entry.name, null);
+      return null;
+    }
+    const list = await infra.listSecrets(entry);
+    providerSecretLists.set(entry.name, list);
+    return list;
+  }
+
+  async function checkEntry(entry, depth) {
     const indent = '  '.repeat(depth);
     let entryFailures = 0;
 
@@ -585,10 +611,20 @@ function check(target) {
       }
     }
 
+    // Secrets: query provider when infra.secret_store is required, otherwise process.env
+    const providerSecrets = await loadProviderSecrets(entry);
     for (const secret of entry.secrets) {
-      if (process.env[secret]) { console.log(`${indent}  ✓ secret ${secret}`); passes++; }
+      let isSet, source;
+      if (providerSecrets !== null) {
+        isSet = providerSecrets.includes(secret);
+        source = ` (${infra.ID})`;
+      } else {
+        isSet = !!process.env[secret];
+        source = ' (env)';
+      }
+      if (isSet) { console.log(`${indent}  ✓ secret ${secret}${source}`); passes++; }
       else {
-        console.log(`${indent}  ✗ secret ${secret} — not set`);
+        console.log(`${indent}  ✗ secret ${secret} — not set${source}`);
         console.log(`${indent}      → ./.life.core secret set ${entry.name} ${secret} <value>`);
         entryFailures++;
       }
@@ -648,7 +684,7 @@ function check(target) {
 
   for (const entry of targetEntries) {
     console.log(`\n── ${entry.name} (${entry.path}) ──`);
-    checkEntry(entry, 0);
+    await checkEntry(entry, 0);
   }
 
   console.log(`\n${passes} passed, ${failures} failed`);
@@ -694,9 +730,16 @@ async function deploy(target) {
     const provider = provided.get(cap);
     if (!provider || provider.name === entry.name) continue;
 
-    // Check the provider directory's secrets and check commands
     let providerFailures = 0;
-    for (const s of provider.secrets || []) if (!process.env[s]) providerFailures++;
+    // Provider's secrets: query infra if it uses infra.secret_store, else env
+    const usesStore = (provider.requires || []).some(r => r.replace(/:\s*public$/, '') === 'infra.secret_store');
+    let providerSecrets = null;
+    if (usesStore && infra.listSecrets) providerSecrets = await infra.listSecrets(provider);
+    for (const s of provider.secrets || []) {
+      const isSet = providerSecrets ? providerSecrets.includes(s) : !!process.env[s];
+      if (!isSet) providerFailures++;
+    }
+    // Provider's check commands
     for (const rawCheck of provider.checks || []) {
       const checkCmd = typeof rawCheck === 'string' ? rawCheck : rawCheck.run;
       if (!checkCmd) continue;

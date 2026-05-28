@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Life 0.1 kernel — single-file distribution
-// Built: 2026-05-28T05:29:03.244Z
+// Built: 2026-05-28T05:33:10.775Z
 
 (function() {
 const _modules = {};
@@ -272,6 +272,26 @@ async function urlFor(entry) {
   return null;
 }
 
+async function setSecret(entry, name, value) {
+  try {
+    // First ensure the worker exists (Cloudflare requires a deployed worker to bind secrets to)
+    const checkRes = await fetch(accountUrl(`/workers/scripts/${entry.name}`), { headers: headers() });
+    if (!(await checkRes.json()).success) {
+      return { ok: false, error: `Deploy ${entry.name} first before setting secrets.` };
+    }
+    const res = await fetch(accountUrl(`/workers/scripts/${entry.name}/secrets`), {
+      method: 'PUT',
+      headers: { ...headers(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, text: value, type: 'secret_text' }),
+    });
+    const data = await res.json();
+    if (!data.success) return { ok: false, error: JSON.stringify(data.errors) };
+    return { ok: true, message: `${name} set on ${entry.name}` };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
 async function check(entry) {
   const results = [];
 
@@ -315,7 +335,7 @@ async function teardown(entry) {
   }
 }
 
-return { ID, detect, connect, deploy, check, teardown, urlFor };
+return { ID, detect, connect, deploy, check, teardown, urlFor, setSecret };
 
 });
 
@@ -419,7 +439,7 @@ if (!ROOT) {
 }
 
 const [,, cmd, ...args] = process.argv;
-const commands = { status, explain, check, index: printIndex, run: runCmd, deploy, ping, connect, reconcile, teardown, help };
+const commands = { status, explain, check, index: printIndex, run: runCmd, deploy, ping, connect, reconcile, teardown, secret: secretCmd, help };
 
 if (!cmd || !commands[cmd]) { help(); process.exit(cmd ? 1 : 0); }
 Promise.resolve(commands[cmd](...args)).catch(e => { console.error(e.message); process.exit(1); });
@@ -560,7 +580,11 @@ function check(target) {
 
     for (const secret of entry.secrets) {
       if (process.env[secret]) { console.log(`  ✓ secret ${secret}`); passes++; }
-      else { console.log(`  ✗ secret ${secret} — not set`); failures++; }
+      else {
+        console.log(`  ✗ secret ${secret} — not set`);
+        console.log(`      → ./.life.core secret set ${entry.name} ${secret} <value>`);
+        failures++;
+      }
     }
 
     for (const rawCheck of entry.checks) {
@@ -684,6 +708,32 @@ function reconcile() {
   }
 }
 
+async function secretCmd(action, target, secretName, ...rest) {
+  if (action !== 'set') {
+    console.error('Usage: life secret set <directory> <NAME> <value>');
+    process.exit(1);
+  }
+  if (!target || !secretName || rest.length === 0) {
+    console.error('Usage: life secret set <directory> <NAME> <value>');
+    process.exit(1);
+  }
+  const value = rest.join(' ');
+  const infra = detectInfra();
+  if (!infra) { console.error('No infra provider connected.'); process.exit(1); }
+  if (!infra.setSecret) {
+    console.error(`Adapter ${infra.ID} does not support setting secrets.`);
+    process.exit(1);
+  }
+
+  const index = buildIndex(ROOT);
+  const entry = index.find(e => e.name === target || e.path === target);
+  if (!entry) { console.error(`Not found: ${target}`); process.exit(1); }
+
+  const result = await infra.setSecret(entry, secretName, value);
+  if (result.ok) console.log(`✓ ${result.message}`);
+  else { console.error(`✗ ${result.error}`); process.exit(1); }
+}
+
 async function teardown(target) {
   if (!target) { console.error('Usage: life teardown <directory>'); process.exit(1); }
   const infra = detectInfra();
@@ -726,10 +776,11 @@ Operate
   reconcile           Regenerate harness files (CLAUDE.md, AGENTS.md)
 
 Infra
-  connect <provider>           Connect an infra provider (e.g. cloudflare)
-  deploy <dir>                 Deploy a directory's infra (prints URL)
-  ping <dir>                   Hit the deployed URL and report status
-  teardown <dir> --confirm     Destroy a directory's infra
+  connect <provider>                Connect an infra provider (e.g. cloudflare)
+  deploy <dir>                      Deploy a directory's infra (prints URL)
+  ping <dir>                        Hit the deployed URL and report status
+  secret set <dir> <NAME> <value>   Set a secret on a deployed directory
+  teardown <dir> --confirm          Destroy a directory's infra
 
 If you just installed: run \`status\` first.`);
 }

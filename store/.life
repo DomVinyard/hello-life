@@ -1,0 +1,26 @@
+life: 0.1
+name: store
+summary: Test directory exercising KV, D1, and R2 bindings
+
+requires:
+  - infra.compute
+  - infra.route
+  - infra.kv
+  - infra.datastore
+  - infra.object_store
+
+provides: []
+secrets: []
+
+commands:
+  test:
+    run: echo "store test passed"
+
+checks:
+  - echo "store check passed"
+
+---
+
+# store
+
+Test directory exercising the KV, D1, and R2 infra bindings.

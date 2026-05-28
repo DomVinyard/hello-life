@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Life 0.1 kernel — single-file distribution
-// Built: 2026-05-28T14:52:23.691Z
+// Built: 2026-05-28T21:07:08.787Z
 
 (function() {
 const _modules = {};
@@ -302,29 +302,218 @@ function accountUrl(p) {
   return `https://api.cloudflare.com/client/v4/accounts/${process.env.CLOUDFLARE_ACCOUNT_ID}${p || ''}`;
 }
 
+async function cfFetch(path, opts = {}) {
+  const res = await fetch(accountUrl(path), { headers: headers(), ...opts });
+  let data;
+  try { data = await res.json(); } catch { return { _status: res.status, _ok: false }; }
+  return { _status: res.status, _ok: data.success, ...data };
+}
+
+// ============================================================
+// Resource handlers
+// One entry per infra.* capability. Each maps the semantic
+// capability to provider-specific resource lifecycle.
+//
+// Each handler defines:
+//   resourceName(entry) — vendor-side name derived from the entry
+//   bindingVar         — the env.<VAR> name the worker sees
+//   provision(entry)   — create-or-return-existing → { ok, id }
+//   verify(entry)      — true if resource exists for this entry
+//   binding(entry)     — metadata.bindings[] entry for worker upload
+//   teardown(entry)    — delete the resource
+// ============================================================
+
+const RESOURCES = {
+  'infra.kv': {
+    resourceName: (entry) => `${entry.name}-kv`,
+    bindingVar: 'KV',
+    async provision(entry) {
+      const title = this.resourceName(entry);
+      const list = await cfFetch('/storage/kv/namespaces?per_page=100');
+      if (list._ok) {
+        const existing = (list.result || []).find(n => n.title === title);
+        if (existing) return { ok: true, id: existing.id, existed: true };
+      }
+      const create = await cfFetch('/storage/kv/namespaces', {
+        method: 'POST',
+        headers: { ...headers(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title }),
+      });
+      if (!create._ok) return { ok: false, error: JSON.stringify(create.errors) };
+      return { ok: true, id: create.result.id, existed: false };
+    },
+    async verify(entry) {
+      const title = this.resourceName(entry);
+      const list = await cfFetch('/storage/kv/namespaces?per_page=100');
+      if (!list._ok) return false;
+      return (list.result || []).some(n => n.title === title);
+    },
+    async binding(entry) {
+      const p = await this.provision(entry);
+      if (!p.ok) return null;
+      return { type: 'kv_namespace', name: this.bindingVar, namespace_id: p.id };
+    },
+    async teardown(entry) {
+      const title = this.resourceName(entry);
+      const list = await cfFetch('/storage/kv/namespaces?per_page=100');
+      if (!list._ok) return { ok: false, error: 'Could not list KV namespaces' };
+      const existing = (list.result || []).find(n => n.title === title);
+      if (!existing) return { ok: true, message: 'KV not present' };
+      const del = await cfFetch(`/storage/kv/namespaces/${existing.id}`, { method: 'DELETE' });
+      return { ok: del._ok, message: del._ok ? `KV "${title}" deleted` : JSON.stringify(del.errors) };
+    },
+  },
+
+  'infra.datastore': {
+    resourceName: (entry) => `${entry.name}-db`,
+    bindingVar: 'DB',
+    async provision(entry) {
+      const name = this.resourceName(entry);
+      const list = await cfFetch('/d1/database?per_page=100');
+      if (list._ok) {
+        const existing = (list.result || []).find(d => d.name === name);
+        if (existing) return { ok: true, id: existing.uuid, existed: true };
+      }
+      const create = await cfFetch('/d1/database', {
+        method: 'POST',
+        headers: { ...headers(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      });
+      if (!create._ok) return { ok: false, error: JSON.stringify(create.errors) };
+      return { ok: true, id: create.result.uuid, existed: false };
+    },
+    async verify(entry) {
+      const name = this.resourceName(entry);
+      const list = await cfFetch('/d1/database?per_page=100');
+      if (!list._ok) return false;
+      return (list.result || []).some(d => d.name === name);
+    },
+    async binding(entry) {
+      const p = await this.provision(entry);
+      if (!p.ok) return null;
+      return { type: 'd1', name: this.bindingVar, id: p.id };
+    },
+    async teardown(entry) {
+      const name = this.resourceName(entry);
+      const list = await cfFetch('/d1/database?per_page=100');
+      if (!list._ok) return { ok: false, error: 'Could not list D1 databases' };
+      const existing = (list.result || []).find(d => d.name === name);
+      if (!existing) return { ok: true, message: 'D1 not present' };
+      const del = await cfFetch(`/d1/database/${existing.uuid}`, { method: 'DELETE' });
+      return { ok: del._ok, message: del._ok ? `D1 "${name}" deleted` : JSON.stringify(del.errors) };
+    },
+  },
+
+  'infra.object_store': {
+    resourceName: (entry) => `${entry.name}-objects`,
+    bindingVar: 'OBJECTS',
+    async provision(entry) {
+      const name = this.resourceName(entry);
+      const list = await cfFetch('/r2/buckets');
+      if (list._ok) {
+        const existing = (list.result?.buckets || []).find(b => b.name === name);
+        if (existing) return { ok: true, id: name, existed: true };
+      }
+      const create = await cfFetch('/r2/buckets', {
+        method: 'POST',
+        headers: { ...headers(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      });
+      if (!create._ok) return { ok: false, error: JSON.stringify(create.errors) };
+      return { ok: true, id: name, existed: false };
+    },
+    async verify(entry) {
+      const name = this.resourceName(entry);
+      const list = await cfFetch('/r2/buckets');
+      if (!list._ok) return false;
+      return (list.result?.buckets || []).some(b => b.name === name);
+    },
+    async binding(entry) {
+      const p = await this.provision(entry);
+      if (!p.ok) return null;
+      return { type: 'r2_bucket', name: this.bindingVar, bucket_name: p.id };
+    },
+    async teardown(entry) {
+      const name = this.resourceName(entry);
+      // R2 requires the bucket be empty before delete. Drain it first.
+      try {
+        let cursor = null;
+        for (let i = 0; i < 50; i++) {
+          const q = cursor ? `?cursor=${encodeURIComponent(cursor)}` : '';
+          const list = await cfFetch(`/r2/buckets/${name}/objects${q}`);
+          if (!list._ok) break;
+          const objects = list.result || [];
+          if (!objects.length) break;
+          for (const obj of objects) {
+            await cfFetch(`/r2/buckets/${name}/objects/${encodeURIComponent(obj.key)}`, { method: 'DELETE' });
+          }
+          cursor = list.result_info?.cursor;
+          if (!cursor) break;
+        }
+      } catch {}
+      const del = await cfFetch(`/r2/buckets/${name}`, { method: 'DELETE' });
+      if (del._status === 404) return { ok: true, message: 'R2 not present' };
+      return { ok: del._ok, message: del._ok ? `R2 "${name}" deleted` : JSON.stringify(del.errors) };
+    },
+  },
+
+  'infra.compute': null,
+  'infra.route': null,
+  'infra.secret_store': null,
+};
+
+function handlerFor(rawCap) {
+  const cap = rawCap.replace(/:\s*public$/, '');
+  return RESOURCES[cap] ?? undefined;
+}
+
+function resourcesNeeded(entry) {
+  const out = [];
+  for (const rawCap of entry.requires || []) {
+    const h = handlerFor(rawCap);
+    if (h) out.push({ cap: rawCap, handler: h });
+  }
+  return out;
+}
+
+// ============================================================
+// Lifecycle
+// ============================================================
+
 async function connect() {
   const token = process.env.CLOUDFLARE_API_TOKEN;
   const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
-
   if (!token) return { ok: false, error: 'CLOUDFLARE_API_TOKEN not set' };
   if (!accountId) return { ok: false, error: 'CLOUDFLARE_ACCOUNT_ID not set' };
+  const r = await cfFetch();
+  if (!r._ok) return { ok: false, error: r.errors?.[0]?.message || 'Account not accessible' };
+  return { ok: true, account: r.result.name };
+}
 
-  // cfat_ tokens fail /user/tokens/verify — use account endpoint instead
-  try {
-    const res = await fetch(accountUrl(), { headers: headers() });
-    const data = await res.json();
-    if (!data.success)
-      return { ok: false, error: data.errors?.[0]?.message || 'Account not accessible' };
-    return { ok: true, account: data.result.name };
-  } catch (e) {
-    return { ok: false, error: e.message };
+async function provision(entry) {
+  const needed = resourcesNeeded(entry);
+  const provisioned = [];
+  for (const { cap, handler } of needed) {
+    const result = await handler.provision(entry);
+    if (!result.ok) return { ok: false, error: `${cap}: ${result.error}` };
+    provisioned.push({ cap, handler, ...result });
   }
+  return { ok: true, provisioned };
 }
 
 async function deploy(dir, entry) {
   const workerPath = path.join(dir, 'src', 'worker.js');
   if (!fs.existsSync(workerPath))
     return { ok: false, error: `No src/worker.js in ${dir}` };
+
+  const prov = await provision(entry);
+  if (!prov.ok) return { ok: false, error: prov.error };
+
+  const bindings = [];
+  for (const p of prov.provisioned) {
+    const b = await p.handler.binding(entry);
+    if (b) bindings.push(b);
+  }
 
   const code = fs.readFileSync(workerPath, 'utf-8');
   const name = entry.name;
@@ -333,142 +522,100 @@ async function deploy(dir, entry) {
   formData.append('metadata', new Blob([JSON.stringify({
     main_module: 'worker.js',
     compatibility_date: '2024-01-01',
+    bindings,
   })], { type: 'application/json' }));
   formData.append('worker.js', new Blob([code], { type: 'application/javascript+module' }), 'worker.js');
 
+  const res = await fetch(accountUrl(`/workers/scripts/${name}`), {
+    method: 'PUT',
+    headers: headers(),
+    body: formData,
+  });
+  const data = await res.json();
+  if (!data.success) return { ok: false, error: JSON.stringify(data.errors) };
+
+  let url = null;
   try {
-    const res = await fetch(accountUrl(`/workers/scripts/${name}`), {
-      method: 'PUT',
-      headers: headers(),
-      body: formData,
+    await cfFetch(`/workers/scripts/${name}/subdomain`, {
+      method: 'POST',
+      headers: { ...headers(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: true }),
     });
-    const data = await res.json();
-    if (!data.success)
-      return { ok: false, error: JSON.stringify(data.errors) };
+    const sub = await cfFetch('/workers/subdomain');
+    if (sub._ok && sub.result?.subdomain) {
+      url = `https://${name}.${sub.result.subdomain}.workers.dev`;
+    }
+  } catch {}
 
-    // Enable the workers.dev subdomain so the worker is actually reachable
-    let url = null;
-    try {
-      await fetch(accountUrl(`/workers/scripts/${name}/subdomain`), {
-        method: 'POST',
-        headers: { ...headers(), 'Content-Type': 'application/json' },
-        body: JSON.stringify({ enabled: true }),
-      });
-      // Fetch account subdomain to construct URL
-      const subRes = await fetch(accountUrl('/workers/subdomain'), { headers: headers() });
-      const subData = await subRes.json();
-      if (subData.success && subData.result?.subdomain) {
-        url = `https://${name}.${subData.result.subdomain}.workers.dev`;
-      }
-    } catch {}
-
-    return {
-      ok: true,
-      message: url
-        ? `Worker "${name}" deployed → ${url}`
-        : `Worker "${name}" deployed`,
-      url,
-    };
-  } catch (e) {
-    return { ok: false, error: e.message };
-  }
+  const bindingNames = bindings.map(b => b.name).join(', ');
+  const bindingsMsg = bindings.length ? ` · bindings: ${bindingNames}` : '';
+  return {
+    ok: true,
+    message: url ? `Worker "${name}" deployed → ${url}${bindingsMsg}` : `Worker "${name}" deployed${bindingsMsg}`,
+    url,
+  };
 }
 
 async function urlFor(entry) {
-  try {
-    const subRes = await fetch(accountUrl('/workers/subdomain'), { headers: headers() });
-    const subData = await subRes.json();
-    if (subData.success && subData.result?.subdomain) {
-      return `https://${entry.name}.${subData.result.subdomain}.workers.dev`;
-    }
-  } catch {}
+  const sub = await cfFetch('/workers/subdomain');
+  if (sub._ok && sub.result?.subdomain) {
+    return `https://${entry.name}.${sub.result.subdomain}.workers.dev`;
+  }
   return null;
 }
 
-async function setSecret(entry, name, value) {
-  try {
-    // /settings returns JSON; /workers/scripts/{n} returns multipart script bytes
-    const checkRes = await fetch(accountUrl(`/workers/scripts/${entry.name}/settings`), { headers: headers() });
-    if (checkRes.status === 404) {
-      return { ok: false, error: `Deploy ${entry.name} first, then set secrets.` };
-    }
-    const res = await fetch(accountUrl(`/workers/scripts/${entry.name}/secrets`), {
-      method: 'PUT',
-      headers: { ...headers(), 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, text: value, type: 'secret_text' }),
-    });
-    const data = await res.json();
-    if (!data.success) return { ok: false, error: JSON.stringify(data.errors) };
-    return { ok: true, message: `${name} set on ${entry.name}` };
-  } catch (e) {
-    return { ok: false, error: e.message };
-  }
-}
-
 async function exists(entry) {
-  try {
-    const res = await fetch(accountUrl(`/workers/scripts/${entry.name}/settings`), { headers: headers() });
-    return res.status !== 404;
-  } catch { return false; }
+  const r = await cfFetch(`/workers/scripts/${entry.name}/settings`);
+  return r._status !== 404;
 }
 
 async function listSecrets(entry) {
-  // Returns array of secret names bound to the deployed worker, or null if worker doesn't exist
-  try {
-    const res = await fetch(accountUrl(`/workers/scripts/${entry.name}/secrets`), { headers: headers() });
-    if (res.status === 404) return null;
-    const data = await res.json();
-    if (!data.success) return null;
-    return (data.result || []).map(s => s.name);
-  } catch {
-    return null;
-  }
+  const r = await cfFetch(`/workers/scripts/${entry.name}/secrets`);
+  if (r._status === 404) return null;
+  if (!r._ok) return null;
+  return (r.result || []).map(s => s.name);
 }
 
-async function check(entry) {
-  const results = [];
+async function setSecret(entry, name, value) {
+  const settings = await cfFetch(`/workers/scripts/${entry.name}/settings`);
+  if (settings._status === 404) return { ok: false, error: `Deploy ${entry.name} first, then set secrets.` };
+  const r = await cfFetch(`/workers/scripts/${entry.name}/secrets`, {
+    method: 'PUT',
+    headers: { ...headers(), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, text: value, type: 'secret_text' }),
+  });
+  if (!r._ok) return { ok: false, error: JSON.stringify(r.errors) };
+  return { ok: true, message: `${name} set on ${entry.name}` };
+}
 
-  // Check if Worker exists
-  if ((entry.requires || []).some(r => r.includes('infra.compute'))) {
-    try {
-      const res = await fetch(accountUrl(`/workers/scripts/${entry.name}`), { headers: headers() });
-      const data = await res.json();
-      results.push({
-        check: `Worker "${entry.name}"`,
-        ok: data.success,
-        detail: data.success ? 'exists' : 'not deployed',
-      });
-    } catch (e) {
-      results.push({ check: `Worker "${entry.name}"`, ok: false, detail: e.message });
-    }
-  }
-
-  // Check secrets
-  for (const secret of entry.secrets || []) {
-    results.push({
-      check: `secret ${secret}`,
-      ok: !!process.env[secret],
-      detail: process.env[secret] ? 'set in env' : 'not set',
-    });
-  }
-
-  return results;
+async function verifyResource(entry, rawCap) {
+  const handler = handlerFor(rawCap);
+  if (!handler) return null;
+  return await handler.verify(entry);
 }
 
 async function teardown(entry) {
-  try {
-    const res = await fetch(accountUrl(`/workers/scripts/${entry.name}`), {
-      method: 'DELETE',
-      headers: headers(),
-    });
-    const data = await res.json();
-    return { ok: data.success, message: data.success ? `Worker "${entry.name}" deleted` : 'Failed' };
-  } catch (e) {
-    return { ok: false, error: e.message };
+  const messages = [];
+  const workerDel = await cfFetch(`/workers/scripts/${entry.name}`, { method: 'DELETE' });
+  if (workerDel._ok) messages.push(`Worker "${entry.name}" deleted`);
+  else if (workerDel._status !== 404) messages.push(`Worker delete failed: ${JSON.stringify(workerDel.errors)}`);
+
+  const needed = resourcesNeeded(entry);
+  for (const { handler } of needed) {
+    const r = await handler.teardown(entry);
+    if (r.message) messages.push(r.message);
   }
+  return { ok: true, message: messages.join(' · ') };
 }
 
-return { ID, detect, connect, deploy, check, teardown, urlFor, setSecret, listSecrets, exists };
+async function check(entry) {
+  return [];
+}
+
+return {
+  ID, detect, connect, deploy, check, teardown, urlFor,
+  setSecret, listSecrets, exists, verifyResource, provision,
+};
 
 });
 
@@ -823,7 +970,21 @@ async function check(target) {
           passes++;
         }
       } else if (fromInfra) {
-        console.log(`${indent}  ✓ ${rawCap} (${infra.ID})`); passes++;
+        // Ask the adapter whether the resource actually exists for THIS entry.
+        // Returns true/false for resources the adapter handles, null for
+        // capabilities with no per-entry resource (e.g. infra.route).
+        let resourceLive = null;
+        if (infra.verifyResource) {
+          resourceLive = await infra.verifyResource(entry, rawCap);
+        }
+        if (resourceLive === false) {
+          console.log(`${indent}  ✗ ${rawCap} (${infra.ID}: not provisioned)`);
+          console.log(`${indent}      → ./.life.core deploy ${entry.name}`);
+          entryFailures++;
+        } else {
+          console.log(`${indent}  ✓ ${rawCap} (${infra.ID})`);
+          passes++;
+        }
       } else {
         console.log(`${indent}  ✗ ${rawCap} — not provided`); entryFailures++;
       }

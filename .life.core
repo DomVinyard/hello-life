@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Life 0.1 kernel — single-file distribution
-// Built: 2026-05-28T04:54:06.887Z
+// Built: 2026-05-28T05:19:02.987Z
 
 (function() {
 const _modules = {};
@@ -232,7 +232,30 @@ async function deploy(dir, entry) {
     const data = await res.json();
     if (!data.success)
       return { ok: false, error: JSON.stringify(data.errors) };
-    return { ok: true, message: `Worker "${name}" deployed` };
+
+    // Enable the workers.dev subdomain so the worker is actually reachable
+    let url = null;
+    try {
+      await fetch(accountUrl(`/workers/scripts/${name}/subdomain`), {
+        method: 'POST',
+        headers: { ...headers(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: true }),
+      });
+      // Fetch account subdomain to construct URL
+      const subRes = await fetch(accountUrl('/workers/subdomain'), { headers: headers() });
+      const subData = await subRes.json();
+      if (subData.success && subData.result?.subdomain) {
+        url = `https://${name}.${subData.result.subdomain}.workers.dev`;
+      }
+    } catch {}
+
+    return {
+      ok: true,
+      message: url
+        ? `Worker "${name}" deployed → ${url}`
+        : `Worker "${name}" deployed`,
+      url,
+    };
   } catch (e) {
     return { ok: false, error: e.message };
   }
@@ -378,7 +401,9 @@ const harnessAdapters = [_require("claude-code"), _require("codex")];
 
 const ROOT = findRoot(process.cwd());
 if (!ROOT) {
-  console.error('Not a Life repo (no .life.core found in this directory or any parent)');
+  console.error(`Not a Life repo.`);
+  console.error(`  Looked for .life.core in ${process.cwd()} and parent directories — not found.`);
+  console.error(`  Either cd to the repo root, or install: curl -fsSL https://raw.githubusercontent.com/DomVinyard/life/main/install.sh | sh`);
   process.exit(1);
 }
 

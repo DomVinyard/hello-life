@@ -6,7 +6,11 @@ summary: Test repo for the Life protocol
 
 # Hello Life
 
-This is a Life repo. Before editing, run `life status`.
-Before editing a path, run `life explain <path>`.
+This is a Life repo. The kernel is `./.life.core`.
 
-The `life` CLI is at `./life` in the repo root.
+    ./.life.core status            # current state
+    ./.life.core explain <path>    # what governs this path
+    ./.life.core check             # verify against reality
+    ./.life.core help              # all commands
+
+Run any command with the kernel from the repo root.

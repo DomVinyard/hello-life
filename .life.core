@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Life 0.1 kernel — single-file distribution
-// Built: 2026-05-28T13:58:14.268Z
+// Built: 2026-05-28T14:02:19.306Z
 
 (function() {
 const _modules = {};
@@ -468,7 +468,7 @@ if (!ROOT) {
 }
 
 const [,, cmd, ...args] = process.argv;
-const commands = { status, explain, check, index: printIndex, run: runCmd, deploy, ping, connect, reconcile, teardown, secret: secretCmd, new: newCmd, help };
+const commands = { status, explain, check, index: printIndex, run: runCmd, deploy, ping, connect, reconcile, teardown, secret: secretCmd, new: newCmd, deps: depsCmd, help };
 
 if (!cmd || !commands[cmd]) { help(); process.exit(cmd ? 1 : 0); }
 Promise.resolve(commands[cmd](...args)).catch(e => { console.error(e.message); process.exit(1); });
@@ -698,8 +698,12 @@ async function check(target) {
     targetEntries = allEntries; // already in some order; capability lookups handle cross-refs
   }
 
+  const focusName = target ? targetEntries[targetEntries.length - 1].name : null;
   for (const entry of targetEntries) {
-    console.log(`\n── ${entry.name} (${entry.path}) ──`);
+    const isFocus = entry.name === focusName;
+    const isContext = target && !isFocus;
+    const tag = isContext ? ' — dep' : '';
+    console.log(`\n── ${entry.name} (${entry.path})${tag} ──`);
     await checkEntry(entry, 0);
   }
 
@@ -976,6 +980,65 @@ async function teardown(target) {
   else { console.error(`✗ ${result.error}`); process.exit(1); }
 }
 
+function depsCmd(target) {
+  const index = buildIndex(ROOT);
+  const { provided } = resolveGraph(index);
+  const dirs = index.filter(e => e.path !== '.');
+
+  if (!target) {
+    // No arg: show the whole dep graph
+    console.log('Capability graph:');
+    for (const entry of dirs) {
+      const requires = entry.requires || [];
+      const provides = entry.provides || [];
+      if (!requires.length && !provides.length) continue;
+      console.log(`\n  ${entry.name}`);
+      requires.forEach(r => {
+        const cap = r.replace(/:\s*public$/, '');
+        const provider = provided.get(cap);
+        console.log(`    ← ${r}${provider ? ' (from ' + provider.name + ')' : ' (infra)'}`);
+      });
+      provides.forEach(p => {
+        const consumers = dirs.filter(d =>
+          (d.requires || []).some(r => r.replace(/:\s*public$/, '') === p)
+        );
+        const tag = consumers.length ? consumers.map(c => c.name).join(', ') : 'unused';
+        console.log(`    → ${p} (${tag})`);
+      });
+    }
+    return;
+  }
+
+  const entry = dirs.find(e => e.name === target || e.path === target);
+  if (!entry) { console.error(`Not found: ${target}`); process.exit(1); }
+
+  console.log(`${entry.name}:\n`);
+
+  if (entry.requires.length) {
+    console.log('Requires (depends on):');
+    entry.requires.forEach(r => {
+      const cap = r.replace(/:\s*public$/, '');
+      const provider = provided.get(cap);
+      console.log(`  ← ${r}${provider ? ' from ' + provider.name : ' (infra)'}`);
+    });
+    console.log();
+  }
+
+  if (entry.provides.length) {
+    console.log('Provides (consumed by):');
+    entry.provides.forEach(p => {
+      const consumers = dirs.filter(d =>
+        (d.requires || []).some(r => r.replace(/:\s*public$/, '') === p)
+      );
+      if (consumers.length === 0) {
+        console.log(`  → ${p} (unused — no consumers)`);
+      } else {
+        consumers.forEach(c => console.log(`  → ${p} → ${c.name}`));
+      }
+    });
+  }
+}
+
 function printIndex() {
   console.log(JSON.stringify(buildIndex(ROOT).map(({ _parsed, ...e }) => e), null, 2));
 }
@@ -986,6 +1049,7 @@ function help() {
 Orient
   status              What's here, what's connected, what's missing
   explain <path>      What governs this path
+  deps [dir]          Show requires/provides graph (both directions)
   index               Full JSON index of all .life files
 
 Author

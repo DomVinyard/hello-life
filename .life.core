@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Life 0.1 kernel — single-file distribution
-// Built: 2026-05-28T14:43:48.919Z
+// Built: 2026-05-28T14:52:23.691Z
 
 (function() {
 const _modules = {};
@@ -221,6 +221,15 @@ async function fetchRemote(source) {
   return await res.text();
 }
 
+function isImmutableRef(source) {
+  // Cache only when the @<ref> looks like a SHA (hex, ≥7 chars). Tagged refs
+  // like @main, @master, @v1 can move so we always refetch them.
+  const m = source.match(/@([^@]+)$/);
+  if (!m) return false;
+  const ref = m[1];
+  return /^[0-9a-f]{7,40}$/i.test(ref);
+}
+
 async function resolveSkill(source, repoRoot) {
   const isLocal = source.startsWith('./') || source.startsWith('/');
 
@@ -234,7 +243,8 @@ async function resolveSkill(source, repoRoot) {
   } else {
     const key = cacheKey(source);
     const cachePath = path.join(CACHE_DIR, key, 'SKILL.md');
-    if (fs.existsSync(cachePath)) {
+    const useCache = isImmutableRef(source) && fs.existsSync(cachePath);
+    if (useCache) {
       content = fs.readFileSync(cachePath, 'utf-8');
       cached = true;
     } else {
@@ -537,7 +547,8 @@ async function reconcile(root, index) {
     for (const [lifeEvent, hookDef] of Object.entries(entry.hooks || {})) {
       const ccEvent = HOOK_MAP[lifeEvent];
       if (!ccEvent) {
-        console.error(`  ⚠ unknown hook event '${lifeEvent}' in ${entry.name}`);
+        const valid = Object.keys(HOOK_MAP).join(', ');
+        console.error(`  ⚠ unknown hook event '${lifeEvent}' in ${entry.name}. Valid: ${valid}`);
         continue;
       }
       const run = typeof hookDef === 'object' ? hookDef.run : hookDef;
@@ -1254,6 +1265,16 @@ Infra
   ping <dir>                        Hit the deployed URL and report status
   secret set <dir> <NAME> <value>   Set a secret on a deployed directory
   teardown <dir> --confirm          Destroy a directory's infra
+
+.life schema (top-level fields):
+  name, summary, requires[], provides[], commands{}, checks[],
+  secrets[], skills[], hooks{}
+
+  skills:  - ./local/path           (reads SKILL.md)
+           - github.com/u/r/p@sha   (fetches raw SKILL.md, caches)
+  hooks:   session_start | user_prompt | pre_tool | post_tool |
+           stop | subagent_stop | session_end
+           each is { run: "...", matcher?: "Bash" } or a plain command
 
 If you just installed: run \`status\` first.`);
 }

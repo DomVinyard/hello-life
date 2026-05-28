@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Life 0.1 kernel — single-file distribution
-// Built: 2026-05-27T15:56:53.986Z
+// Built: 2026-05-28T02:20:51.870Z
 
 (function() {
 const _modules = {};
@@ -408,20 +408,37 @@ function status() {
 
   console.log(`Life repo: ${path.basename(ROOT)}`);
   console.log(`Directories: ${index.filter(e => e.path !== '.').length}`);
-  console.log(`Infra: ${infra ? infra.ID + ' (detected)' : 'none (set CLOUDFLARE_API_TOKEN)'}`);
-  console.log(`Harness: ${harness ? harness.ID + ' (detected)' : 'none'}`);
+
+  // Infra: show detected one OR list all available with their connect hints
+  if (infra) {
+    console.log(`Infra:    ${infra.ID} (connected)`);
+  } else {
+    console.log(`Infra:    not connected`);
+    console.log(`          available: ${infraAdapters.map(a => a.ID).join(', ')}`);
+    console.log(`          connect:   .dna/genome connect ${infraAdapters[0].ID}`);
+  }
+
+  // Harness: show detected one OR list all available
+  if (harness) {
+    console.log(`Harness:  ${harness.ID} (detected)`);
+  } else {
+    console.log(`Harness:  not detected`);
+    console.log(`          available: ${harnessAdapters.map(a => a.ID).join(', ')}`);
+  }
 
   if (missing.length) {
     const infraMissing = missing.filter(m => m.capability.startsWith('infra.'));
     const otherMissing = missing.filter(m => !m.capability.startsWith('infra.'));
-    if (infraMissing.length && !infra)
-      console.log(`\n${infraMissing.length} infra capabilities unresolved — connect a provider`);
+    if (infraMissing.length && !infra) {
+      console.log(`\n${infraMissing.length} infra capabilities need a provider.`);
+    }
     if (otherMissing.length) {
       console.log(`\nUnresolved:`);
       otherMissing.forEach(m => console.log(`  ✗ ${m.dir} requires ${m.raw}`));
     }
+  } else if (infra) {
+    console.log(`\nAll capabilities resolved.`);
   }
-  if (missing.length === 0) console.log(`\nAll capabilities resolved.`);
 }
 
 function explain(target) {

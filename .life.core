@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Life 0.1 kernel — single-file distribution
-// Built: 2026-05-28T14:20:59.452Z
+// Built: 2026-05-28T14:24:48.529Z
 
 (function() {
 const _modules = {};
@@ -919,29 +919,19 @@ function newCmd(name) {
 
   const lifeFile = `life: 0.1
 name: ${name}
-summary: One-line description of what this directory does
+summary: TODO — one-line description of what this directory does
 
-# What this directory needs from the rest of the graph.
-# Common: infra.compute, infra.route, infra.route: public,
-# infra.datastore, infra.kv, infra.secret_store, model.inference
 requires:
   - infra.compute
   - infra.route
 
-# Capabilities this directory offers to other directories.
-# e.g. provides: ${name}.ready
 provides: []
-
-# Named secrets this directory needs. Will be checked against the
-# infra provider when infra.secret_store is in requires.
 secrets: []
 
-# Commands you can run. Use life run <dir.cmd>.
 commands:
   test:
     run: echo "${name} test passed"
 
-# Verification commands. life check runs these.
 checks:
   - echo "${name} check passed"
 
@@ -949,27 +939,13 @@ checks:
 
 # ${name}
 
-Describe how this directory works for agents.
-Operational knowledge that the YAML can't express goes here.
-
-## Calling other directories
-
-If this directory needs to call a sibling at runtime, the kernel
-doesn't yet generate service bindings — Cloudflare blocks
-worker→workers.dev sibling fetches by default. Either:
-- Add a service binding in your wrangler config manually, or
-- Make this directory a static-asset / route-fronted call.
-\`requires: <sibling>.<cap>\` declares the topology, not the wire.
+TODO — describe how this directory works for agents.
 `;
 
-  const workerFile = `export default {
+  const workerFile = `// TODO — implement
+export default {
   async fetch(request) {
-    return new Response(JSON.stringify({
-      app: '${name}',
-      status: 'alive',
-    }), {
-      headers: { 'Content-Type': 'application/json' },
-    });
+    return new Response('not implemented', { status: 501 });
   },
 };
 `;

@@ -3,13 +3,10 @@ name: hello-life
 summary: Test repo for the Life protocol
 
 skills:
-  - ./local-skills/greeter
+  - github.com/DomVinyard/hello-life/local-skills/greeter@main
 
 ---
 
 # This is a Life repo
 
 The kernel is `./.life.core`. Run it from here.
-
-    ./.life.core status            # current state
-    ./.life.core help              # all commands

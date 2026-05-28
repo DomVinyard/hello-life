@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Life 0.1 kernel — single-file distribution
-// Built: 2026-05-28T14:13:53.357Z
+// Built: 2026-05-28T14:20:59.452Z
 
 (function() {
 const _modules = {};
@@ -951,6 +951,15 @@ checks:
 
 Describe how this directory works for agents.
 Operational knowledge that the YAML can't express goes here.
+
+## Calling other directories
+
+If this directory needs to call a sibling at runtime, the kernel
+doesn't yet generate service bindings — Cloudflare blocks
+worker→workers.dev sibling fetches by default. Either:
+- Add a service binding in your wrangler config manually, or
+- Make this directory a static-asset / route-fronted call.
+\`requires: <sibling>.<cap>\` declares the topology, not the wire.
 `;
 
   const workerFile = `export default {
@@ -1034,8 +1043,10 @@ function depsCmd(target) {
   function reqLine(rawCap) {
     const cap = rawCap.replace(/:\s*public$/, '');
     const provider = provided.get(cap);
-    const source = provider ? provider.name : 'infra';
-    return `← ${rawCap} (${source})`;
+    if (provider) return `← ${rawCap} (${provider.name})`;
+    if (cap.startsWith('infra.') || cap.startsWith('storage.') || cap.startsWith('model.') || cap.startsWith('life.'))
+      return `← ${rawCap} (infra)`;
+    return `← ${rawCap} (NOT PROVIDED)`;
   }
 
   // Helper: format `→ capability (consumers or "unused")`

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Life 0.1 kernel — single-file distribution
-// Built: 2026-05-28T02:20:51.870Z
+// Built: 2026-05-28T04:54:06.887Z
 
 (function() {
 const _modules = {};
@@ -74,8 +74,7 @@ function parseYaml(text) {
 function findRoot(dir) {
   let d = path.resolve(dir);
   while (d !== path.dirname(d)) {
-    if (fs.existsSync(path.join(d, 'README.life'))) return d;
-    if (fs.existsSync(path.join(d, '.dna'))) return d;
+    if (fs.existsSync(path.join(d, '.life.core'))) return d;
     d = path.dirname(d);
   }
   return null;
@@ -83,13 +82,14 @@ function findRoot(dir) {
 
 function discoverLifeFiles(root) {
   const files = [];
-  const readme = path.join(root, 'README.life');
-  if (fs.existsSync(readme)) files.push(readme);
+  // Root .life file
+  const rootLife = path.join(root, '.life');
+  if (fs.existsSync(rootLife) && fs.statSync(rootLife).isFile()) files.push(rootLife);
 
   function walk(dir, depth) {
     if (depth > 5) return;
     const base = path.basename(dir);
-    if (['node_modules', '.git', 'dist', '.dna'].includes(base)) return;
+    if (['node_modules', '.git', 'dist'].includes(base)) return;
 
     if (dir !== root) {
       const lf = path.join(dir, '.life');
@@ -112,7 +112,7 @@ function buildIndex(root) {
   return discoverLifeFiles(root).map(f => {
     try {
       const parsed = parseLifeFile(f);
-      const relPath = path.relative(root, f === path.join(root, 'README.life') ? root : path.dirname(f));
+      const relPath = path.relative(root, path.dirname(f));
       return {
         path: relPath || '.',
         file: path.relative(root, f),
@@ -378,7 +378,7 @@ const harnessAdapters = [_require("claude-code"), _require("codex")];
 
 const ROOT = findRoot(process.cwd());
 if (!ROOT) {
-  console.error('Not a Life repo (no README.life or .dna/ found)');
+  console.error('Not a Life repo (no .life.core found in this directory or any parent)');
   process.exit(1);
 }
 

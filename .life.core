@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Life 0.1 kernel — single-file distribution
-// Built: 2026-05-28T05:33:10.775Z
+// Built: 2026-05-28T13:43:02.196Z
 
 (function() {
 const _modules = {};
@@ -556,34 +556,41 @@ function explain(target) {
 
 function check(target) {
   const index = buildIndex(ROOT);
-  const { provided, missing, warnings } = resolveGraph(index);
+  const { provided, warnings } = resolveGraph(index);
   const infra = detectInfra();
   let failures = 0, passes = 0;
+  const providerFailures = new Map(); // dir name → fail count
 
-  const entries = target
-    ? index.filter(e => e.name === target || e.path === target || e.path.endsWith('/' + target))
-    : index.filter(e => e.path !== '.');
-
-  if (target && !entries.length) { console.error(`Not found: ${target}`); process.exit(1); }
-
-  for (const entry of entries) {
-    console.log(`\n── ${entry.name} (${entry.path}) ──`);
+  function checkEntry(entry, depth) {
+    const indent = '  '.repeat(depth);
+    let entryFailures = 0;
 
     for (const rawCap of entry.requires) {
       const cap = rawCap.replace(/:\s*public$/, '');
       const fromDir = provided.get(cap);
       const fromInfra = cap.startsWith('infra.') && infra;
-      if (fromDir) { console.log(`  ✓ ${rawCap} (${fromDir.name})`); passes++; }
-      else if (fromInfra) { console.log(`  ✓ ${rawCap} (${infra.ID})`); passes++; }
-      else { console.log(`  ✗ ${rawCap} — not provided`); failures++; }
+      if (fromDir) {
+        const providerFails = providerFailures.get(fromDir.name) || 0;
+        if (providerFails > 0) {
+          console.log(`${indent}  ✗ ${rawCap} (${fromDir.name} has ${providerFails} failing check${providerFails === 1 ? '' : 's'})`);
+          entryFailures++;
+        } else {
+          console.log(`${indent}  ✓ ${rawCap} (${fromDir.name})`);
+          passes++;
+        }
+      } else if (fromInfra) {
+        console.log(`${indent}  ✓ ${rawCap} (${infra.ID})`); passes++;
+      } else {
+        console.log(`${indent}  ✗ ${rawCap} — not provided`); entryFailures++;
+      }
     }
 
     for (const secret of entry.secrets) {
-      if (process.env[secret]) { console.log(`  ✓ secret ${secret}`); passes++; }
+      if (process.env[secret]) { console.log(`${indent}  ✓ secret ${secret}`); passes++; }
       else {
-        console.log(`  ✗ secret ${secret} — not set`);
-        console.log(`      → ./.life.core secret set ${entry.name} ${secret} <value>`);
-        failures++;
+        console.log(`${indent}  ✗ secret ${secret} — not set`);
+        console.log(`${indent}      → ./.life.core secret set ${entry.name} ${secret} <value>`);
+        entryFailures++;
       }
     }
 
@@ -592,8 +599,8 @@ function check(target) {
       if (!checkCmd) continue;
       try {
         execSync(checkCmd, { cwd: path.join(ROOT, entry.path), stdio: 'pipe', timeout: 30000 });
-        console.log(`  ✓ ${checkCmd}`); passes++;
-      } catch { console.log(`  ✗ ${checkCmd}`); failures++; }
+        console.log(`${indent}  ✓ ${checkCmd}`); passes++;
+      } catch { console.log(`${indent}  ✗ ${checkCmd}`); entryFailures++; }
     }
 
     // Dangerous combo warnings
@@ -602,9 +609,46 @@ function check(target) {
     const hasAuth = entry.requires.some(r => r.startsWith('auth.'));
     const hasAgent = entry.requires.includes('life.agent');
     if (hasPub && hasCommit && !hasAuth)
-      console.log(`  ⚠ public + storage.commit without auth`);
+      console.log(`${indent}  ⚠ public + storage.commit without auth`);
     if (hasAgent)
-      console.log(`  ⚠ life.agent — can spawn sessions and modify code`);
+      console.log(`${indent}  ⚠ life.agent — can spawn sessions and modify code`);
+
+    providerFailures.set(entry.name, entryFailures);
+    failures += entryFailures;
+  }
+
+  // Toposort: providers first, then dependents
+  // Simple approach: do two passes — every directory, in order. The provided map is global,
+  // so if check is targeted, we still need to check upstream providers first.
+  const allEntries = index.filter(e => e.path !== '.');
+
+  let targetEntries;
+  if (target) {
+    const targetEntry = allEntries.find(e => e.name === target || e.path === target || e.path.endsWith('/' + target));
+    if (!targetEntry) { console.error(`Not found: ${target}`); process.exit(1); }
+
+    // Walk requires transitively, providers-first
+    const visited = new Set();
+    const ordered = [];
+    function walk(e) {
+      if (visited.has(e.name)) return;
+      visited.add(e.name);
+      for (const rawCap of e.requires) {
+        const cap = rawCap.replace(/:\s*public$/, '');
+        const provider = provided.get(cap);
+        if (provider && provider.name !== e.name) walk(provider);
+      }
+      ordered.push(e);
+    }
+    walk(targetEntry);
+    targetEntries = ordered;
+  } else {
+    targetEntries = allEntries; // already in some order; capability lookups handle cross-refs
+  }
+
+  for (const entry of targetEntries) {
+    console.log(`\n── ${entry.name} (${entry.path}) ──`);
+    checkEntry(entry, 0);
   }
 
   console.log(`\n${passes} passed, ${failures} failed`);
@@ -641,6 +685,34 @@ async function deploy(target) {
   const index = buildIndex(ROOT);
   const entry = index.find(e => e.name === target || e.path === target);
   if (!entry) { console.error(`Not found: ${target}`); process.exit(1); }
+
+  // Pre-flight: check dependency providers for failures
+  const { provided } = resolveGraph(index);
+  const brokenDeps = [];
+  for (const rawCap of entry.requires) {
+    const cap = rawCap.replace(/:\s*public$/, '');
+    const provider = provided.get(cap);
+    if (!provider || provider.name === entry.name) continue;
+
+    // Check the provider directory's secrets and check commands
+    let providerFailures = 0;
+    for (const s of provider.secrets || []) if (!process.env[s]) providerFailures++;
+    for (const rawCheck of provider.checks || []) {
+      const checkCmd = typeof rawCheck === 'string' ? rawCheck : rawCheck.run;
+      if (!checkCmd) continue;
+      try { execSync(checkCmd, { cwd: path.join(ROOT, provider.path), stdio: 'pipe', timeout: 30000 }); }
+      catch { providerFailures++; }
+    }
+    if (providerFailures > 0) brokenDeps.push({ provider: provider.name, cap: rawCap, failures: providerFailures });
+  }
+
+  if (brokenDeps.length && !args.includes('--force')) {
+    console.error(`✗ Cannot deploy ${entry.name} — dependencies have failing checks:`);
+    brokenDeps.forEach(d => console.error(`  ${d.cap} ← ${d.provider} (${d.failures} failing)`));
+    console.error(`\nRun: ./.life.core check ${entry.name}  (to see details)`);
+    console.error(`Override:  ./.life.core deploy ${entry.name} --force`);
+    process.exit(1);
+  }
 
   console.log(`Deploying ${entry.name} via ${infra.ID}...`);
   const result = await infra.deploy(path.join(ROOT, entry.path), entry);

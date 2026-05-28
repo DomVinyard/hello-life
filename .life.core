@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Life 0.1 kernel — single-file distribution
-// Built: 2026-05-28T05:19:02.987Z
+// Built: 2026-05-28T05:25:18.385Z
 
 (function() {
 const _modules = {};
@@ -427,42 +427,44 @@ function detectHarness() {
 
 function status() {
   const index = buildIndex(ROOT);
+  const dirs = index.filter(e => e.path !== '.');
   const { missing, warnings } = resolveGraph(index);
   const infra = detectInfra();
   const harness = detectHarness();
 
   console.log(`Life repo: ${path.basename(ROOT)}`);
-  console.log(`Directories: ${index.filter(e => e.path !== '.').length}`);
+  console.log(`Directories (${dirs.length}): ${dirs.map(d => d.name).join(', ') || '(none)'}`);
 
-  // Infra: show detected one OR list all available with their connect hints
   if (infra) {
-    console.log(`Infra:    ${infra.ID} (connected)`);
+    console.log(`Infra:     ${infra.ID} (connected)`);
   } else {
-    console.log(`Infra:    not connected`);
-    console.log(`          available: ${infraAdapters.map(a => a.ID).join(', ')}`);
-    console.log(`          connect:   .dna/genome connect ${infraAdapters[0].ID}`);
+    console.log(`Infra:     not connected`);
   }
 
-  // Harness: show detected one OR list all available
   if (harness) {
-    console.log(`Harness:  ${harness.ID} (detected)`);
+    console.log(`Harness:   ${harness.ID} (detected)`);
   } else {
-    console.log(`Harness:  not detected`);
-    console.log(`          available: ${harnessAdapters.map(a => a.ID).join(', ')}`);
+    console.log(`Harness:   not detected`);
   }
 
-  if (missing.length) {
-    const infraMissing = missing.filter(m => m.capability.startsWith('infra.'));
-    const otherMissing = missing.filter(m => !m.capability.startsWith('infra.'));
-    if (infraMissing.length && !infra) {
-      console.log(`\n${infraMissing.length} infra capabilities need a provider.`);
-    }
-    if (otherMissing.length) {
-      console.log(`\nUnresolved:`);
-      otherMissing.forEach(m => console.log(`  ✗ ${m.dir} requires ${m.raw}`));
-    }
-  } else if (infra) {
-    console.log(`\nAll capabilities resolved.`);
+  const otherMissing = missing.filter(m => !m.capability.startsWith('infra.'));
+  if (otherMissing.length) {
+    console.log(`\nUnresolved capabilities:`);
+    otherMissing.forEach(m => console.log(`  ✗ ${m.dir} requires ${m.raw}`));
+  }
+
+  // Next step — exactly one suggestion based on current state
+  console.log('');
+  if (!infra) {
+    const opt = infraAdapters[0].ID;
+    console.log(`Next: ./.life.core connect ${opt}      # ${infraAdapters.map(a => a.ID).join(' | ')}`);
+  } else if (otherMissing.length) {
+    console.log(`Next: install a provider for the unresolved capabilities above.`);
+  } else if (dirs.length === 0) {
+    console.log(`Next: create a directory with a .life file. See ./.life.core help for the format.`);
+  } else {
+    console.log(`Next: ./.life.core check          # verify everything works`);
+    console.log(`      ./.life.core explain <dir>  # learn about a directory`);
   }
 }
 
@@ -669,19 +671,24 @@ function printIndex() {
 }
 
 function help() {
-  console.log(`life 0.1 — repo convention for agent-legible infra
+  console.log(`Life 0.1 — repo convention for agent-legible infra
 
-Commands:
-  life status            Current state
-  life explain <path>    What governs this path
-  life check [dir]       Verify against reality
-  life index             Print the index
-  life run <dir.cmd>     Execute a command
-  life deploy <dir>      Deploy via infra provider
-  life connect <name>    Connect an infra provider
-  life reconcile         Generate harness files
-  life teardown <dir>    Destroy infra (--confirm)
-  life help              This message`);
+Orient
+  status              What's here, what's connected, what's missing
+  explain <path>      What governs this path
+  index               Full JSON index of all .life files
+
+Operate
+  check [dir]         Verify capabilities, secrets, run checks
+  run <dir.cmd>       Execute a command from a .life file
+  reconcile           Regenerate harness files (CLAUDE.md, AGENTS.md)
+
+Infra
+  connect <provider>  Connect an infra provider (e.g. cloudflare)
+  deploy <dir>        Deploy a directory's infra
+  teardown <dir>      Destroy a directory's infra (--confirm required)
+
+If you just installed: run \`status\` first.`);
 }
 
 })();

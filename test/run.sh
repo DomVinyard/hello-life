@@ -25,7 +25,7 @@ echo
 # --- Status ---
 echo "life status:"
 assert "finds repo" "$LIFE status" "Life repo:"
-assert "counts directories" "$LIFE status" "Directories:"
+assert "counts directories" "$LIFE status" "Directories ("
 assert "detects infra" "$LIFE status" "Infra:"
 
 # --- Index ---

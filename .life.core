@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Life 0.1 kernel — single-file distribution
-// Built: 2026-05-28T21:16:30.091Z
+// Built: 2026-05-28T21:52:32.874Z
 
 (function() {
 const _modules = {};
@@ -352,7 +352,7 @@ const RESOURCES = {
     async binding(entry) {
       const p = await this.provision(entry);
       if (!p.ok) return null;
-      return { type: 'kv_namespace', name: this.bindingVar, namespace_id: p.id };
+      return { type: 'kv_namespace', name: this.bindingVar, namespace_id: p.id, resourceName: this.resourceName(entry) };
     },
     async teardown(entry) {
       const title = this.resourceName(entry);
@@ -393,7 +393,7 @@ const RESOURCES = {
     async binding(entry) {
       const p = await this.provision(entry);
       if (!p.ok) return null;
-      return { type: 'd1', name: this.bindingVar, id: p.id };
+      return { type: 'd1', name: this.bindingVar, id: p.id, resourceName: this.resourceName(entry) };
     },
     async teardown(entry) {
       const name = this.resourceName(entry);
@@ -434,7 +434,7 @@ const RESOURCES = {
     async binding(entry) {
       const p = await this.provision(entry);
       if (!p.ok) return null;
-      return { type: 'r2_bucket', name: this.bindingVar, bucket_name: p.id };
+      return { type: 'r2_bucket', name: this.bindingVar, bucket_name: p.id, resourceName: this.resourceName(entry) };
     },
     async teardown(entry) {
       const name = this.resourceName(entry);
@@ -563,7 +563,7 @@ async function deploy(dir, entry) {
     }
   } catch {}
 
-  const bindingNames = bindings.map(b => b.name).join(', ');
+  const bindingNames = bindings.map(b => b.resourceName ? `${b.name} (${b.resourceName})` : b.name).join(', ');
   const bindingsMsg = bindings.length ? ` · bindings: ${bindingNames}` : '';
   return {
     ok: true,
@@ -814,7 +814,7 @@ if (!ROOT) {
 }
 
 const [,, cmd, ...args] = process.argv;
-const commands = { status, explain, check, index: printIndex, run: runCmd, deploy, ping, connect, reconcile, teardown, secret: secretCmd, new: newCmd, deps: depsCmd, caps, capabilities: caps, help };
+const commands = { status, explain, check, index: printIndex, run: runCmd, deploy, ping, url: urlCmd, connect, reconcile, teardown, secret: secretCmd, new: newCmd, deps: depsCmd, caps, capabilities: caps, help };
 
 if (!cmd || !commands[cmd]) { help(); process.exit(cmd ? 1 : 0); }
 Promise.resolve(commands[cmd](...args)).catch(e => { console.error(e.message); process.exit(1); });
@@ -933,7 +933,7 @@ async function check(target) {
   const index = buildIndex(ROOT);
   const { provided, warnings } = resolveGraph(index);
   const infra = detectInfra();
-  let failures = 0, passes = 0;
+  let failures = 0, passes = 0, pending = 0;
   const providerFailures = new Map();
   const providerSecretLists = new Map(); // entry.name → string[] of secret names set on provider
 
@@ -968,6 +968,11 @@ async function check(target) {
     const indent = '  '.repeat(depth);
     let entryFailures = 0;
 
+    // Flag unreplaced scaffold placeholders as warnings (not failures).
+    if (typeof entry.summary === 'string' && /^\s*TODO\b/.test(entry.summary)) {
+      console.log(`${indent}  ⚠ summary still has TODO placeholder`);
+    }
+
     for (const rawCap of entry.requires) {
       const cap = rawCap.replace(/:\s*public$/, '');
       const fromDir = provided.get(cap);
@@ -979,9 +984,9 @@ async function check(target) {
           console.log(`${indent}  ✗ ${rawCap} (${fromDir.name} has ${providerFails} failing check${providerFails === 1 ? '' : 's'})`);
           entryFailures++;
         } else if (!providerLive) {
-          console.log(`${indent}  ✗ ${rawCap} (${fromDir.name} declares it but is not deployed)`);
+          console.log(`${indent}  ⋯ ${rawCap} (${fromDir.name} declared but not deployed)`);
           console.log(`${indent}      → ./.life.core deploy ${fromDir.name}`);
-          entryFailures++;
+          pending++;
         } else {
           console.log(`${indent}  ✓ ${rawCap} (${fromDir.name})`);
           passes++;
@@ -995,9 +1000,9 @@ async function check(target) {
           resourceLive = await infra.verifyResource(entry, rawCap);
         }
         if (resourceLive === false) {
-          console.log(`${indent}  ✗ ${rawCap} (${infra.ID}: not provisioned)`);
+          console.log(`${indent}  ⋯ ${rawCap} (${infra.ID}: not yet provisioned)`);
           console.log(`${indent}      → ./.life.core deploy ${entry.name}`);
-          entryFailures++;
+          pending++;
         } else {
           console.log(`${indent}  ✓ ${rawCap} (${infra.ID})`);
           passes++;
@@ -1087,8 +1092,12 @@ async function check(target) {
     await checkEntry(entry, 0);
   }
 
-  console.log(`\n${passes} passed, ${failures} failed`);
+  const parts = [`${passes} passed`];
+  if (pending > 0) parts.push(`${pending} pending (run deploy)`);
+  if (failures > 0) parts.push(`${failures} failed`);
+  console.log(`\n${parts.join(', ')}`);
   warnings.forEach(w => console.log(`⚠ ${w}`));
+  // Pre-deploy state (pending) is NOT a failure — only real breakage exits 1.
   process.exit(failures > 0 ? 1 : 0);
 }
 
@@ -1163,8 +1172,50 @@ async function deploy(target) {
   else { console.error(`✗ ${result.error}`); process.exit(1); }
 }
 
-async function ping(target) {
-  if (!target) { console.error('Usage: life ping <directory>'); process.exit(1); }
+async function urlCmd(target) {
+  if (!target) { console.error('Usage: life url <directory>'); process.exit(1); }
+  const infra = detectInfra();
+  if (!infra) { console.error('No infra provider connected.'); process.exit(1); }
+  const index = buildIndex(ROOT);
+  const entry = index.find(e => e.name === target || e.path === target);
+  if (!entry) { console.error(`Not found: ${target}`); process.exit(1); }
+  if (!infra.urlFor) { console.error(`Adapter ${infra.ID} does not expose URLs.`); process.exit(1); }
+  if (infra.exists) {
+    const live = await infra.exists(entry);
+    if (!live) {
+      console.log(`${entry.name} not deployed`);
+      console.log(`  → ./.life.core deploy ${entry.name}`);
+      process.exit(1);
+    }
+  }
+  const url = await infra.urlFor(entry);
+  if (!url) { console.error('Could not determine URL.'); process.exit(1); }
+  console.log(url);
+}
+
+async function ping(...rawArgs) {
+  // Parse: ping <dir> [--path /x] [--method POST] [--body '...']
+  let target = null;
+  let pathOverride = '/';
+  let method = 'GET';
+  let body = null;
+  let contentType = null;
+  for (let i = 0; i < rawArgs.length; i++) {
+    const a = rawArgs[i];
+    if (a === '--help' || a === '-h') { printPingHelp(); return; }
+    if (a === '--path' || a === '-p') { pathOverride = rawArgs[++i] || '/'; }
+    else if (a.startsWith('--path=')) { pathOverride = a.slice('--path='.length); }
+    else if (a === '--method' || a === '-X') { method = (rawArgs[++i] || 'GET').toUpperCase(); }
+    else if (a.startsWith('--method=')) { method = a.slice('--method='.length).toUpperCase(); }
+    else if (a === '--body' || a === '-d') { body = rawArgs[++i] ?? ''; }
+    else if (a.startsWith('--body=')) { body = a.slice('--body='.length); }
+    else if (a === '--content-type') { contentType = rawArgs[++i]; }
+    else if (a.startsWith('-')) { console.error(`Unknown flag: ${a}`); process.exit(1); }
+    else if (!target) target = a;
+    else { console.error(`Unexpected argument: ${a}`); process.exit(1); }
+  }
+  if (!target) { printPingHelp(); process.exit(1); }
+
   const infra = detectInfra();
   if (!infra) { console.error('No infra provider connected.'); process.exit(1); }
   const index = buildIndex(ROOT);
@@ -1176,7 +1227,6 @@ async function ping(target) {
     process.exit(1);
   }
 
-  // Check existence first — saves us from dumping CF's 404 HTML wall
   if (infra.exists) {
     const stillThere = await infra.exists(entry);
     if (!stillThere) {
@@ -1186,16 +1236,25 @@ async function ping(target) {
     }
   }
 
-  const url = await infra.urlFor(entry);
-  if (!url) { console.error('Could not determine URL.'); process.exit(1); }
+  const baseUrl = await infra.urlFor(entry);
+  if (!baseUrl) { console.error('Could not determine URL.'); process.exit(1); }
 
-  console.log(`GET ${url}`);
+  const fullPath = pathOverride.startsWith('/') ? pathOverride : '/' + pathOverride;
+  const url = new URL(fullPath, baseUrl).toString();
+
+  const init = { method };
+  if (body !== null) {
+    init.body = body;
+    init.headers = { 'Content-Type': contentType || 'text/plain' };
+  }
+
+  console.log(`${method} ${url}${body !== null ? `  (body: ${body.length} bytes)` : ''}`);
   try {
     const start = Date.now();
-    const res = await fetch(url);
+    const res = await fetch(url, init);
     const ms = Date.now() - start;
-    const body = await res.text();
-    const preview = body.length > 200 ? body.slice(0, 200) + '…' : body;
+    const respBody = await res.text();
+    const preview = respBody.length > 400 ? respBody.slice(0, 400) + '…' : respBody;
     console.log(`${res.status} ${res.statusText} · ${ms}ms`);
     if (preview.trim()) console.log(preview);
     process.exit(res.ok ? 0 : 1);
@@ -1203,6 +1262,24 @@ async function ping(target) {
     console.error(`✗ ${e.message}`);
     process.exit(1);
   }
+}
+
+function printPingHelp() {
+  console.log(`Usage: life ping <directory> [--path /x] [--method POST] [--body '...']
+
+Smoke-test a deployed directory. Defaults to GET /.
+
+Flags:
+  --path, -p     Path to hit (default: /)
+  --method, -X   HTTP method (default: GET)
+  --body, -d     Request body (sets Content-Type: text/plain unless overridden)
+  --content-type Override Content-Type when --body is set
+
+Examples:
+  ./.life.core ping paste
+  ./.life.core ping paste --path /abc123
+  ./.life.core ping paste -X POST -d 'hello world'
+  ./.life.core ping paste -X POST -d '{"q":1}' --content-type application/json`);
 }
 
 async function connect(name) {
@@ -1571,7 +1648,8 @@ Author
 Infra
   connect <provider>                Connect an infra provider (e.g. cloudflare)
   deploy <dir>                      Deploy a directory's infra (prints URL)
-  ping <dir>                        Hit the deployed URL and report status
+  url <dir>                         Print the deployed URL (or "not deployed")
+  ping <dir> [--path /x --method POST --body ...]   Smoke-test a deployed dir
   secret set <dir> <NAME> <value>   Set a secret on a deployed directory
   teardown <dir> --confirm          Destroy a directory's infra
 

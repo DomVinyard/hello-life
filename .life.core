@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Life 0.1 kernel — single-file distribution
-// Built: 2026-05-28T13:51:03.659Z
+// Built: 2026-05-28T13:58:14.268Z
 
 (function() {
 const _modules = {};
@@ -34,7 +34,15 @@ function parseYaml(text) {
       if (m) {
         currentKey = m[1];
         currentSubKey = null;
-        result[currentKey] = m[2].trim() || undefined;
+        const val = m[2].trim();
+        if (val === '') {
+          result[currentKey] = undefined;
+        } else if (val.startsWith('[') && val.endsWith(']')) {
+          const inner = val.slice(1, -1).trim();
+          result[currentKey] = inner ? inner.split(',').map(s => s.trim()).filter(Boolean) : [];
+        } else {
+          result[currentKey] = val;
+        }
       }
       continue;
     }
@@ -292,6 +300,13 @@ async function setSecret(entry, name, value) {
   }
 }
 
+async function exists(entry) {
+  try {
+    const res = await fetch(accountUrl(`/workers/scripts/${entry.name}/settings`), { headers: headers() });
+    return res.status !== 404;
+  } catch { return false; }
+}
+
 async function listSecrets(entry) {
   // Returns array of secret names bound to the deployed worker, or null if worker doesn't exist
   try {
@@ -348,7 +363,7 @@ async function teardown(entry) {
   }
 }
 
-return { ID, detect, connect, deploy, check, teardown, urlFor, setSecret, listSecrets };
+return { ID, detect, connect, deploy, check, teardown, urlFor, setSecret, listSecrets, exists };
 
 });
 
@@ -434,6 +449,7 @@ return { ID, detect, reconcile };
 });
 
 
+const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
 const { parseLifeFile, findRoot, buildIndex } = _require("parser");
@@ -452,7 +468,7 @@ if (!ROOT) {
 }
 
 const [,, cmd, ...args] = process.argv;
-const commands = { status, explain, check, index: printIndex, run: runCmd, deploy, ping, connect, reconcile, teardown, secret: secretCmd, help };
+const commands = { status, explain, check, index: printIndex, run: runCmd, deploy, ping, connect, reconcile, teardown, secret: secretCmd, new: newCmd, help };
 
 if (!cmd || !commands[cmd]) { help(); process.exit(cmd ? 1 : 0); }
 Promise.resolve(commands[cmd](...args)).catch(e => { console.error(e.message); process.exit(1); });
@@ -775,6 +791,17 @@ async function ping(target) {
     console.error(`Adapter ${infra.ID} does not expose URLs.`);
     process.exit(1);
   }
+
+  // Check existence first — saves us from dumping CF's 404 HTML wall
+  if (infra.exists) {
+    const stillThere = await infra.exists(entry);
+    if (!stillThere) {
+      console.log(`✗ ${entry.name} not deployed`);
+      console.log(`  → ./.life.core deploy ${entry.name}`);
+      process.exit(1);
+    }
+  }
+
   const url = await infra.urlFor(entry);
   if (!url) { console.error('Could not determine URL.'); process.exit(1); }
 
@@ -849,6 +876,82 @@ async function secretCmd(action, target, secretName, ...rest) {
   else { console.error(`✗ ${result.error}`); process.exit(1); }
 }
 
+function newCmd(name) {
+  if (!name) {
+    console.error('Usage: life new <directory>');
+    process.exit(1);
+  }
+  if (!/^[a-z][a-z0-9_-]*$/.test(name)) {
+    console.error(`Invalid name: ${name}. Use lowercase letters, digits, _ and -.`);
+    process.exit(1);
+  }
+  const dir = path.join(ROOT, name);
+  if (fs.existsSync(dir)) {
+    console.error(`Already exists: ${name}/`);
+    process.exit(1);
+  }
+
+  fs.mkdirSync(path.join(dir, 'src'), { recursive: true });
+
+  const lifeFile = `life: 0.1
+name: ${name}
+summary: One-line description of what this directory does
+
+# What this directory needs from the rest of the graph.
+# Common: infra.compute, infra.route, infra.route: public,
+# infra.datastore, infra.kv, infra.secret_store, model.inference
+requires:
+  - infra.compute
+  - infra.route
+
+# Capabilities this directory offers to other directories.
+# e.g. provides: ${name}.ready
+provides: []
+
+# Named secrets this directory needs. Will be checked against the
+# infra provider when infra.secret_store is in requires.
+secrets: []
+
+# Commands you can run. Use life run <dir.cmd>.
+commands:
+  test:
+    run: echo "${name} test passed"
+
+# Verification commands. life check runs these.
+checks:
+  - echo "${name} check passed"
+
+---
+
+# ${name}
+
+Describe how this directory works for agents.
+Operational knowledge that the YAML can't express goes here.
+`;
+
+  const workerFile = `export default {
+  async fetch(request) {
+    return new Response(JSON.stringify({
+      app: '${name}',
+      status: 'alive',
+    }), {
+      headers: { 'Content-Type': 'application/json' },
+    });
+  },
+};
+`;
+
+  fs.writeFileSync(path.join(dir, '.life'), lifeFile);
+  fs.writeFileSync(path.join(dir, 'src', 'worker.js'), workerFile);
+
+  console.log(`Created ${name}/`);
+  console.log(`  ${name}/.life`);
+  console.log(`  ${name}/src/worker.js`);
+  console.log('');
+  console.log(`Next: ./.life.core check ${name}     # verify it parses + resolves`);
+  console.log(`      ./.life.core deploy ${name}    # deploy when ready`);
+}
+
 async function teardown(target) {
   if (!target) { console.error('Usage: life teardown <directory>'); process.exit(1); }
   const infra = detectInfra();
@@ -885,7 +988,8 @@ Orient
   explain <path>      What governs this path
   index               Full JSON index of all .life files
 
-Operate
+Author
+  new <dir>           Scaffold a new directory with .life + worker.js
   check [dir]         Verify capabilities, secrets, run checks
   run <dir.cmd>       Execute a command from a .life file
   reconcile           Regenerate harness files (CLAUDE.md, AGENTS.md)

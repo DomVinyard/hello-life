@@ -2,28 +2,14 @@ life: 0.1
 name: hello-life
 summary: Test repo for the Life protocol
 
+skills:
+  - ./local-skills/greeter
+
 ---
 
 # This is a Life repo
 
-The kernel is `./.life.core` (a single Node script, in this directory). Run it from here.
+The kernel is `./.life.core`. Run it from here.
 
-## First moves
-
-    ./.life.core status     # what's here, what's connected, what's missing
-    ./.life.core help       # all commands
-
-`status` is the orientation command. Run it first.
-
-## What Life is
-
-A Life repo has `.life` files in directories that want to be agent-legible. Each `.life` file declares what the directory needs (`requires:`), what it offers (`provides:`), what commands are safe to run, and how to verify it works. The kernel resolves the graph and runs the commands.
-
-You don't need to read the kernel source. `status`, `explain <dir>`, `check`, `index`, and `help` will tell you everything.
-
-## When you need to do something
-
-- Add a new directory? Create `<dir>/.life`, then `./.life.core check <dir>`
-- Deploy something? `./.life.core deploy <dir>` (needs `connect cloudflare` first)
-- See what governs a path? `./.life.core explain <path>`
-- Regenerate `CLAUDE.md` after editing `.life` files? `./.life.core reconcile`
+    ./.life.core status            # current state
+    ./.life.core help              # all commands

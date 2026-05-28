@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Life 0.1 kernel — single-file distribution
-// Built: 2026-05-28T22:12:15.904Z
+// Built: 2026-05-28T22:22:43.533Z
 
 (function() {
 const _modules = {};
@@ -183,16 +183,18 @@ return { resolveGraph, dependentsOf };
 
 _define("skills", function() {
 // Skill resolver — fetches skill content from GitHub URL@commit or local path.
-// Caches at ~/.life/cache/skills/<sha>/SKILL.md
+// Skills are directories (SKILL.md + optional scripts/, references/, helper files).
+// Caches at ~/.life/cache/skills/<sha>/<rel/path>.
 //
 // Source formats:
-//   github.com/user/repo/path/to/skill@commit   → fetch raw SKILL.md from that path
-//   ./local/path/to/skill                       → read locally
+//   github.com/user/repo/path/to/skill@commit   → fetch tarball, extract subpath
+//   ./local/path/to/skill                       → walk local dir
 
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
+const { execSync } = require('child_process');
 
 const CACHE_DIR = path.join(os.homedir(), '.life', 'cache', 'skills');
 
@@ -211,14 +213,72 @@ function parseFrontmatter(text) {
   return { fm, body: m[2] };
 }
 
-async function fetchRemote(source) {
+function walkSkillDir(dir, relPrefix = '') {
+  const out = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    const rel = relPrefix ? `${relPrefix}/${entry.name}` : entry.name;
+    if (entry.isDirectory()) {
+      out.push(...walkSkillDir(full, rel));
+    } else if (entry.isFile()) {
+      const st = fs.statSync(full);
+      out.push({ path: rel, content: fs.readFileSync(full), mode: st.mode & 0o777 });
+    }
+  }
+  return out;
+}
+
+async function fetchRemoteToCache(source, cacheDir) {
   const m = source.match(/^github\.com\/([^/]+)\/([^/]+)\/(.+?)@(.+)$/);
   if (!m) throw new Error(`Invalid GitHub skill source: ${source}`);
   const [, user, repo, subpath, commit] = m;
-  const url = `https://raw.githubusercontent.com/${user}/${repo}/${commit}/${subpath}/SKILL.md`;
+
+  // codeload.github.com serves the public tarball without auth, faster than the API.
+  const url = `https://codeload.github.com/${user}/${repo}/tar.gz/${commit}`;
   const res = await fetch(url);
-  if (!res.ok) throw new Error(`Failed to fetch ${url}: HTTP ${res.status}`);
-  return await res.text();
+  if (!res.ok) throw new Error(`Failed to fetch tarball ${url}: HTTP ${res.status}`);
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'life-skill-'));
+  try {
+    const tarPath = path.join(tmpDir, 'skill.tar.gz');
+    const buf = Buffer.from(await res.arrayBuffer());
+    fs.writeFileSync(tarPath, buf);
+
+    const extractDir = path.join(tmpDir, 'extracted');
+    fs.mkdirSync(extractDir, { recursive: true });
+    execSync(`tar -xzf ${JSON.stringify(tarPath)} -C ${JSON.stringify(extractDir)}`, { stdio: 'pipe' });
+
+    // codeload tarballs have a single top-level dir like <repo>-<short-sha>/
+    const topLevels = fs.readdirSync(extractDir);
+    if (topLevels.length !== 1) throw new Error(`Unexpected tarball structure for ${source}`);
+    const repoRoot = path.join(extractDir, topLevels[0]);
+    const skillSrc = path.join(repoRoot, subpath);
+
+    if (!fs.existsSync(skillSrc)) throw new Error(`Subpath ${subpath} not in repo for ${source}`);
+    if (!fs.existsSync(path.join(skillSrc, 'SKILL.md'))) throw new Error(`No SKILL.md at ${subpath} for ${source}`);
+
+    // Replace cache dir contents wholesale.
+    if (fs.existsSync(cacheDir)) fs.rmSync(cacheDir, { recursive: true, force: true });
+    fs.mkdirSync(cacheDir, { recursive: true });
+    copyRecursive(skillSrc, cacheDir);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
+function copyRecursive(src, dst) {
+  fs.mkdirSync(dst, { recursive: true });
+  for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+    const s = path.join(src, entry.name);
+    const d = path.join(dst, entry.name);
+    if (entry.isDirectory()) {
+      copyRecursive(s, d);
+    } else if (entry.isFile()) {
+      fs.copyFileSync(s, d);
+      const st = fs.statSync(s);
+      fs.chmodSync(d, st.mode & 0o777);
+    }
+  }
 }
 
 function isImmutableRef(source) {
@@ -233,28 +293,28 @@ function isImmutableRef(source) {
 async function resolveSkill(source, repoRoot) {
   const isLocal = source.startsWith('./') || source.startsWith('/');
 
-  let content;
+  let files;
   let cached = false;
   if (isLocal) {
     const abs = path.isAbsolute(source) ? source : path.resolve(repoRoot, source);
-    const skillFile = path.join(abs, 'SKILL.md');
-    if (!fs.existsSync(skillFile)) throw new Error(`No SKILL.md at ${abs}`);
-    content = fs.readFileSync(skillFile, 'utf-8');
+    if (!fs.existsSync(path.join(abs, 'SKILL.md'))) throw new Error(`No SKILL.md at ${abs}`);
+    files = walkSkillDir(abs);
   } else {
     const key = cacheKey(source);
-    const cachePath = path.join(CACHE_DIR, key, 'SKILL.md');
-    const useCache = isImmutableRef(source) && fs.existsSync(cachePath);
+    const cacheDir = path.join(CACHE_DIR, key);
+    const useCache = isImmutableRef(source) && fs.existsSync(path.join(cacheDir, 'SKILL.md'));
     if (useCache) {
-      content = fs.readFileSync(cachePath, 'utf-8');
       cached = true;
     } else {
-      content = await fetchRemote(source);
-      fs.mkdirSync(path.dirname(cachePath), { recursive: true });
-      fs.writeFileSync(cachePath, content);
+      await fetchRemoteToCache(source, cacheDir);
     }
+    files = walkSkillDir(cacheDir);
   }
 
-  const { fm } = parseFrontmatter(content);
+  const skillMd = files.find(f => f.path === 'SKILL.md');
+  if (!skillMd) throw new Error(`No SKILL.md in skill bundle: ${source}`);
+  const { fm } = parseFrontmatter(skillMd.content.toString('utf-8'));
+
   let name = fm.name;
   if (!name) {
     if (isLocal) {
@@ -265,7 +325,7 @@ async function resolveSkill(source, repoRoot) {
     }
   }
 
-  return { name, content, source, cached };
+  return { name, files, source, cached };
 }
 
 async function resolveAllSkills(sources, repoRoot) {
@@ -738,7 +798,7 @@ async function reconcile(root, index) {
     generated.push('CLAUDE.md');
   }
 
-  // 2. Skills — collect from every .life file, resolve, write to .claude/skills/<name>/SKILL.md
+  // 2. Skills — collect from every .life file, resolve, write each file under .claude/skills/<name>/
   const allSkillSources = [...new Set(index.flatMap(e => e.skills || []))];
   if (allSkillSources.length) {
     const skillsDir = path.join(root, '.claude', 'skills');
@@ -750,9 +810,18 @@ async function reconcile(root, index) {
         continue;
       }
       const skillPath = path.join(skillsDir, r.name);
+      // Replace prior layout wholesale so removed files in the upstream skill
+      // don't linger locally.
+      if (fs.existsSync(skillPath)) fs.rmSync(skillPath, { recursive: true, force: true });
       fs.mkdirSync(skillPath, { recursive: true });
-      fs.writeFileSync(path.join(skillPath, 'SKILL.md'), r.content);
-      generated.push(`.claude/skills/${r.name}/SKILL.md`);
+      for (const f of r.files) {
+        const dst = path.join(skillPath, f.path);
+        fs.mkdirSync(path.dirname(dst), { recursive: true });
+        fs.writeFileSync(dst, f.content);
+        if (f.mode) fs.chmodSync(dst, f.mode);
+      }
+      const n = r.files.length;
+      generated.push(`.claude/skills/${r.name}/ (${n} file${n === 1 ? '' : 's'})`);
     }
   }
 

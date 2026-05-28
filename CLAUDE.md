@@ -31,17 +31,6 @@ Commands:
 
 A static site. Builds to dist/. Deploy is push-to-main.
 
-## evtest
-
-tracks named events, totals via KV, recent rows via D1
-
-Commands:
-- `test`: `echo "evtest test passed"`
-
-# evtest
-
-Tracks named events. POST /event with Bearer token writes a row + bumps a KV counter.
-
 ## hello
 
 Tiny Worker that proves the Life deploy loop

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Life 0.1 kernel — single-file distribution
-// Built: 2026-05-28T14:02:19.306Z
+// Built: 2026-05-28T14:06:36.498Z
 
 (function() {
 const _modules = {};
@@ -603,6 +603,21 @@ async function check(target) {
     return list;
   }
 
+  const deployedCache = new Map();
+  async function isProviderDeployed(provider) {
+    if (deployedCache.has(provider.name)) return deployedCache.get(provider.name);
+    // Only directories that themselves require infra.compute could be "deployed" in the provider sense.
+    const needsCompute = (provider.requires || []).some(r => r.replace(/:\s*public$/, '') === 'infra.compute');
+    if (!needsCompute || !infra || !infra.exists) {
+      // Not deployable, so the capability is satisfied by the file alone
+      deployedCache.set(provider.name, true);
+      return true;
+    }
+    const live = await infra.exists(provider);
+    deployedCache.set(provider.name, live);
+    return live;
+  }
+
   async function checkEntry(entry, depth) {
     const indent = '  '.repeat(depth);
     let entryFailures = 0;
@@ -613,8 +628,13 @@ async function check(target) {
       const fromInfra = cap.startsWith('infra.') && infra;
       if (fromDir) {
         const providerFails = providerFailures.get(fromDir.name) || 0;
+        const providerLive = await isProviderDeployed(fromDir);
         if (providerFails > 0) {
           console.log(`${indent}  ✗ ${rawCap} (${fromDir.name} has ${providerFails} failing check${providerFails === 1 ? '' : 's'})`);
+          entryFailures++;
+        } else if (!providerLive) {
+          console.log(`${indent}  ✗ ${rawCap} (${fromDir.name} declares it but is not deployed)`);
+          console.log(`${indent}      → ./.life.core deploy ${fromDir.name}`);
           entryFailures++;
         } else {
           console.log(`${indent}  ✓ ${rawCap} (${fromDir.name})`);
@@ -957,23 +977,47 @@ Operational knowledge that the YAML can't express goes here.
 }
 
 async function teardown(target) {
-  if (!target) { console.error('Usage: life teardown <directory>'); process.exit(1); }
+  if (!target) { console.error('Usage: life teardown <directory> --confirm'); process.exit(1); }
   const infra = detectInfra();
   if (!infra) { console.error('No infra provider.'); process.exit(1); }
-  if (!args.includes('--confirm')) {
-    console.log(`⚠ life teardown is destructive. Pass --confirm to proceed.`);
-    const index = buildIndex(ROOT);
-    const deps = dependentsOf(target, index);
-    if (deps.length) {
-      console.log(`\nThese directories depend on ${target}:`);
-      deps.forEach(d => console.log(`  ${d.name}`));
-    }
-    process.exit(1);
-  }
 
   const index = buildIndex(ROOT);
   const entry = index.find(e => e.name === target);
   if (!entry) { console.error(`Not found: ${target}`); process.exit(1); }
+
+  // Find directories that require any capability THIS directory provides
+  const dirs = index.filter(e => e.path !== '.');
+  const consumers = (entry.provides || []).flatMap(cap =>
+    dirs
+      .filter(d => d.name !== entry.name && (d.requires || []).some(r => r.replace(/:\s*public$/, '') === cap))
+      .map(d => ({ dir: d.name, cap }))
+  );
+
+  // Of those consumers, which are currently deployed (i.e. would be broken by teardown)
+  let liveConsumers = consumers;
+  if (infra.exists && consumers.length) {
+    const checks = await Promise.all(consumers.map(async c => ({
+      ...c,
+      live: await infra.exists(dirs.find(d => d.name === c.dir)),
+    })));
+    liveConsumers = checks.filter(c => c.live);
+  }
+
+  if (liveConsumers.length && !args.includes('--force')) {
+    console.error(`✗ Cannot teardown ${target} — live consumers would break:`);
+    liveConsumers.forEach(c => console.error(`  ${c.dir} requires ${c.cap}`));
+    console.error(`\nTeardown consumers first, or override:  ./.life.core teardown ${target} --confirm --force`);
+    process.exit(1);
+  }
+
+  if (!args.includes('--confirm')) {
+    console.log(`⚠ ./.life.core teardown ${target} is destructive. Pass --confirm to proceed.`);
+    if (consumers.length) {
+      console.log(`\nDirectories that declare a dependency on ${target}:`);
+      consumers.forEach(c => console.log(`  ${c.dir} (${c.cap})`));
+    }
+    process.exit(1);
+  }
 
   const result = await infra.teardown(entry);
   if (result.ok) console.log(`✓ ${result.message}`);

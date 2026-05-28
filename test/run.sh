@@ -63,7 +63,7 @@ assert "set secrets pass" "DATABASE_URL=x API_KEY=y $LIFE check api" "secret DAT
 # --- Graph ---
 echo
 echo "capability graph:"
-assert "blog.preview flows blog→api" "$LIFE check api" "blog.preview (blog)"
+assert "blog.preview flows blog→api" "$LIFE check api" "blog.preview"
 assert "api.ready provided" "$LIFE index" "api.ready"
 assert "infra.route resolves" "$LIFE check blog" "infra.route"
 

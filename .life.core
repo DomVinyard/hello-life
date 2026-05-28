@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Life 0.1 kernel — single-file distribution
-// Built: 2026-05-28T21:07:08.787Z
+// Built: 2026-05-28T21:16:30.091Z
 
 (function() {
 const _modules = {};
@@ -327,6 +327,7 @@ const RESOURCES = {
   'infra.kv': {
     resourceName: (entry) => `${entry.name}-kv`,
     bindingVar: 'KV',
+    description: 'KV namespace (key-value store)',
     async provision(entry) {
       const title = this.resourceName(entry);
       const list = await cfFetch('/storage/kv/namespaces?per_page=100');
@@ -367,6 +368,7 @@ const RESOURCES = {
   'infra.datastore': {
     resourceName: (entry) => `${entry.name}-db`,
     bindingVar: 'DB',
+    description: 'D1 database (SQLite)',
     async provision(entry) {
       const name = this.resourceName(entry);
       const list = await cfFetch('/d1/database?per_page=100');
@@ -407,6 +409,7 @@ const RESOURCES = {
   'infra.object_store': {
     resourceName: (entry) => `${entry.name}-objects`,
     bindingVar: 'OBJECTS',
+    description: 'R2 bucket (object storage)',
     async provision(entry) {
       const name = this.resourceName(entry);
       const list = await cfFetch('/r2/buckets');
@@ -465,6 +468,19 @@ const RESOURCES = {
 function handlerFor(rawCap) {
   const cap = rawCap.replace(/:\s*public$/, '');
   return RESOURCES[cap] ?? undefined;
+}
+
+// All capabilities this adapter knows about, with their binding contracts.
+// Used by `caps` and `--help` for discoverability, and by `new --requires`.
+function capabilities() {
+  return [
+    { cap: 'infra.compute', binding: null, description: 'Worker runtime' },
+    { cap: 'infra.route', binding: null, description: 'workers.dev URL or custom domain' },
+    { cap: 'infra.kv', binding: 'env.KV', description: 'KV namespace (key-value store)' },
+    { cap: 'infra.datastore', binding: 'env.DB', description: 'D1 database (SQLite)' },
+    { cap: 'infra.object_store', binding: 'env.OBJECTS', description: 'R2 bucket (object storage)' },
+    { cap: 'infra.secret_store', binding: null, description: 'Worker secrets (managed via `secret set`)' },
+  ];
 }
 
 function resourcesNeeded(entry) {
@@ -615,6 +631,7 @@ async function check(entry) {
 return {
   ID, detect, connect, deploy, check, teardown, urlFor,
   setSecret, listSecrets, exists, verifyResource, provision,
+  capabilities,
 };
 
 });
@@ -797,7 +814,7 @@ if (!ROOT) {
 }
 
 const [,, cmd, ...args] = process.argv;
-const commands = { status, explain, check, index: printIndex, run: runCmd, deploy, ping, connect, reconcile, teardown, secret: secretCmd, new: newCmd, deps: depsCmd, help };
+const commands = { status, explain, check, index: printIndex, run: runCmd, deploy, ping, connect, reconcile, teardown, secret: secretCmd, new: newCmd, deps: depsCmd, caps, capabilities: caps, help };
 
 if (!cmd || !commands[cmd]) { help(); process.exit(cmd ? 1 : 0); }
 Promise.resolve(commands[cmd](...args)).catch(e => { console.error(e.message); process.exit(1); });
@@ -1237,11 +1254,30 @@ async function secretCmd(action, target, secretName, ...rest) {
   else { console.error(`✗ ${result.error}`); process.exit(1); }
 }
 
-function newCmd(name) {
-  if (!name) {
-    console.error('Usage: life new <directory>');
-    process.exit(1);
+function newCmd(...rawArgs) {
+  // Parse: life new <name> [--requires cap[,cap...]]
+  let name = null;
+  let extraRequires = [];
+  for (let i = 0; i < rawArgs.length; i++) {
+    const a = rawArgs[i];
+    if (a === '--help' || a === '-h') return printNewHelp();
+    if (a === '--requires' || a === '-r') {
+      const val = rawArgs[++i];
+      if (!val) { console.error('--requires needs a value (e.g. --requires infra.kv,infra.datastore)'); process.exit(1); }
+      extraRequires = val.split(',').map(s => s.trim()).filter(Boolean);
+    } else if (a.startsWith('--requires=')) {
+      extraRequires = a.slice('--requires='.length).split(',').map(s => s.trim()).filter(Boolean);
+    } else if (a.startsWith('-')) {
+      console.error(`Unknown flag: ${a}\nRun \`./.life.core new --help\` for usage.`);
+      process.exit(1);
+    } else if (!name) {
+      name = a;
+    } else {
+      console.error(`Unexpected argument: ${a}`); process.exit(1);
+    }
   }
+
+  if (!name) { printNewHelp(); process.exit(1); }
   if (!/^[a-z][a-z0-9_-]*$/.test(name)) {
     console.error(`Invalid name: ${name}. Use lowercase letters, digits, _ and -.`);
     process.exit(1);
@@ -1252,6 +1288,37 @@ function newCmd(name) {
     process.exit(1);
   }
 
+  // Validate requires against active adapter's known caps (if connected)
+  const infra = detectInfra();
+  const known = infra?.capabilities ? infra.capabilities().map(c => c.cap) : [];
+  if (known.length) {
+    for (const r of extraRequires) {
+      const cap = r.replace(/:\s*public$/, '');
+      if (!known.includes(cap)) {
+        console.error(`Unknown capability: ${r}`);
+        console.error(`Run \`./.life.core caps\` to see what ${infra.ID} provides.`);
+        process.exit(1);
+      }
+    }
+  }
+
+  // Default requires (always present) + any --requires the user asked for
+  const defaultReqs = ['infra.compute', 'infra.route'];
+  const allRequires = [...new Set([...defaultReqs, ...extraRequires])];
+
+  // Build worker stub that references the bindings the user actually asked for
+  const bindingExamples = [];
+  if (infra?.capabilities) {
+    const caps = infra.capabilities();
+    for (const r of extraRequires) {
+      const cap = r.replace(/:\s*public$/, '');
+      const info = caps.find(c => c.cap === cap);
+      if (info?.binding) {
+        bindingExamples.push({ cap, binding: info.binding, description: info.description });
+      }
+    }
+  }
+
   fs.mkdirSync(path.join(dir, 'src'), { recursive: true });
 
   const lifeFile = `life: 0.1
@@ -1259,8 +1326,7 @@ name: ${name}
 summary: TODO — one-line description of what this directory does
 
 requires:
-  - infra.compute
-  - infra.route
+${allRequires.map(r => `  - ${r}`).join('\n')}
 
 provides: []
 secrets: []
@@ -1279,13 +1345,31 @@ checks:
 TODO — describe how this directory works for agents.
 `;
 
-  const workerFile = `// TODO — implement
+  let workerFile;
+  if (bindingExamples.length) {
+    const bindingComment = bindingExamples
+      .map(b => `//   ${b.binding.padEnd(14)} ${b.description}`)
+      .join('\n');
+    workerFile = `// Bindings available (from .life requires):
+${bindingComment}
+//
+// Example usage lives in the comments below — delete what you don't need.
 export default {
-  async fetch(request) {
+  async fetch(request, env) {
+${bindingExamples.map(b => exampleFor(b.cap)).join('\n\n')}
+
     return new Response('not implemented', { status: 501 });
   },
 };
 `;
+  } else {
+    workerFile = `export default {
+  async fetch(request, env) {
+    return new Response('hello from ${name}');
+  },
+};
+`;
+  }
 
   fs.writeFileSync(path.join(dir, '.life'), lifeFile);
   fs.writeFileSync(path.join(dir, 'src', 'worker.js'), workerFile);
@@ -1293,9 +1377,72 @@ export default {
   console.log(`Created ${name}/`);
   console.log(`  ${name}/.life`);
   console.log(`  ${name}/src/worker.js`);
+  if (extraRequires.length) {
+    console.log(`  bindings: ${bindingExamples.map(b => b.binding).join(', ') || '(none)'}`);
+  }
   console.log('');
   console.log(`Next: ./.life.core check ${name}     # verify it parses + resolves`);
   console.log(`      ./.life.core deploy ${name}    # deploy when ready`);
+}
+
+function exampleFor(cap) {
+  switch (cap) {
+    case 'infra.kv':
+      return `    // KV — key-value store
+    // await env.KV.put('key', 'value');
+    // const v = await env.KV.get('key');`;
+    case 'infra.datastore':
+      return `    // D1 — SQLite database
+    // await env.DB.exec('CREATE TABLE IF NOT EXISTS t (k TEXT, v TEXT)');
+    // const { results } = await env.DB.prepare('SELECT * FROM t WHERE k = ?').bind('key').all();`;
+    case 'infra.object_store':
+      return `    // R2 — object storage
+    // await env.OBJECTS.put('file.txt', 'contents');
+    // const obj = await env.OBJECTS.get('file.txt');
+    // const text = obj ? await obj.text() : null;`;
+    default:
+      return `    // ${cap}`;
+  }
+}
+
+function printNewHelp() {
+  console.log(`Usage: life new <directory> [--requires cap[,cap...]]
+
+Scaffolds a new directory with a .life file and src/worker.js.
+
+Flags:
+  --requires, -r   Comma-separated extra capabilities. Pre-fills .life
+                   requires and seeds the worker stub with example
+                   usage of the bindings.
+
+Examples:
+  ./.life.core new api
+  ./.life.core new store --requires infra.kv,infra.datastore
+  ./.life.core new shortener -r infra.kv
+
+Run \`./.life.core caps\` to see what your connected provider supports.`);
+}
+
+function caps() {
+  const infra = detectInfra();
+  if (!infra) {
+    console.log('No infra provider connected. Connect one to see its capabilities:');
+    console.log(`  ./.life.core connect ${infraAdapters[0].ID}`);
+    return;
+  }
+  if (!infra.capabilities) {
+    console.log(`${infra.ID} is connected but does not expose a capability list.`);
+    return;
+  }
+  const list = infra.capabilities();
+  console.log(`Capabilities (${infra.ID}):`);
+  const pad = Math.max(...list.map(c => c.cap.length)) + 2;
+  for (const c of list) {
+    const binding = c.binding ? `  → ${c.binding}` : '';
+    console.log(`  ${c.cap.padEnd(pad)} ${c.description}${binding}`);
+  }
+  console.log(`\nUse in .life:  requires: [${list.slice(0, 3).map(c => c.cap).join(', ')}, ...]`);
+  console.log(`Scaffold:      ./.life.core new <dir> --requires infra.kv,infra.datastore`);
 }
 
 async function teardown(target) {
@@ -1412,13 +1559,14 @@ Orient
   status              What's here, what's connected, what's missing
   explain <path>      What governs this path
   deps [dir]          Show requires/provides graph (both directions)
+  caps                List capabilities the connected provider supports
   index               Full JSON index of all .life files
 
 Author
-  new <dir>           Scaffold a new directory with .life + worker.js
-  check [dir]         Verify capabilities, secrets, run checks
-  run <dir.cmd>       Execute a command from a .life file
-  reconcile           Regenerate harness files (CLAUDE.md, AGENTS.md)
+  new <dir> [--requires cap,cap]   Scaffold .life + binding-aware worker stub
+  check [dir]                      Verify capabilities, secrets, run checks
+  run <dir.cmd>                    Execute a command from a .life file
+  reconcile                        Regenerate harness files (CLAUDE.md, AGENTS.md)
 
 Infra
   connect <provider>                Connect an infra provider (e.g. cloudflare)
@@ -1438,6 +1586,18 @@ Infra
            each is { run: "...", matcher?: "Bash" } or a plain command
 
 If you just installed: run \`status\` first.`);
+
+  // Live capabilities from the connected provider — what `requires:` accepts.
+  const infra = detectInfra();
+  if (infra?.capabilities) {
+    const list = infra.capabilities();
+    const pad = Math.max(...list.map(c => c.cap.length)) + 2;
+    console.log(`\nCapabilities (${infra.ID}):`);
+    for (const c of list) {
+      const binding = c.binding ? `  → ${c.binding}` : '';
+      console.log(`  ${c.cap.padEnd(pad)} ${c.description}${binding}`);
+    }
+  }
 }
 
 })();
